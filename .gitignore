@@ -1,0 +1,26 @@
+# Environment & secrets
+.env
+
+# Build output
+*.jar
+*.class
+target/
+piassistant/target/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# User data
+user_profile.json
+
+claude
+claude/
+
+.claude
+.claude/

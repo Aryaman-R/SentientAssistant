@@ -1,0 +1,305 @@
+/* Sentient Assistant — Bare Minimum Dark Theme */
+
+.root {
+    -fx-base: #1a1a1a;
+    -fx-background-color: #1a1a1a;
+    -fx-font-family: 'Courier New', monospace;
+}
+
+.root-pane {
+    -fx-background-color: #1a1a1a;
+}
+
+/* Sidebar */
+.sidebar {
+    -fx-background-color: #222;
+    -fx-border-color: #444;
+    -fx-border-width: 0 1 0 0;
+    -fx-min-width: 140px;
+}
+
+.brand-label {
+    -fx-text-fill: #eee;
+    -fx-font-size: 16px;
+    -fx-font-weight: bold;
+    -fx-padding: 0 0 15 0;
+}
+
+.nav-button {
+    -fx-background-color: transparent;
+    -fx-text-fill: #ccc;
+    -fx-font-size: 13px;
+    -fx-cursor: hand;
+}
+
+.nav-button:hover {
+    -fx-text-fill: #fff;
+}
+
+.section-header {
+    -fx-text-fill: #aaa;
+    -fx-font-size: 11px;
+}
+
+.camera-container {
+    -fx-border-color: #444;
+    -fx-border-width: 1;
+    -fx-padding: 4;
+}
+
+/* Content */
+.content-view {
+    -fx-background-color: #1a1a1a;
+    -fx-padding: 15;
+}
+
+.view-header {
+    -fx-text-fill: #eee;
+    -fx-font-size: 20px;
+    -fx-font-weight: bold;
+}
+
+/* Terminal */
+.console-output {
+    -fx-control-inner-background: #111;
+    -fx-text-fill: #ddd;
+    -fx-font-family: 'Consolas', 'Monospaced';
+    -fx-font-size: 13px;
+}
+
+.console-input {
+    -fx-background-color: #222;
+    -fx-text-fill: #eee;
+}
+
+.action-button {
+    -fx-background-color: #333;
+    -fx-text-fill: #eee;
+    -fx-cursor: hand;
+}
+
+.action-button:hover {
+    -fx-background-color: #444;
+}
+
+/* Study */
+.study-view {
+    -fx-background-color: #1a1a1a;
+}
+
+.huge-timer {
+    -fx-font-size: 80px;
+    -fx-text-fill: #eee;
+    -fx-cursor: hand;
+}
+
+.timer-done {
+    -fx-text-fill: #6c6;
+}
+
+.timer-edit-field {
+    -fx-background-color: #222;
+    -fx-text-fill: #eee;
+    -fx-font-size: 40px;
+    -fx-alignment: CENTER;
+}
+
+.quote-label {
+    -fx-text-fill: #999;
+    -fx-font-style: italic;
+    -fx-font-size: 14px;
+    -fx-text-alignment: CENTER;
+    -fx-padding: 8 20 4 20;
+}
+
+.status-hint {
+    -fx-text-fill: #666;
+    -fx-font-size: 10px;
+}
+
+/* Progress */
+.focus-progress {
+    -fx-pref-height: 6px;
+    -fx-max-height: 6px;
+}
+
+.focus-progress .track {
+    -fx-background-color: #333;
+}
+
+.focus-progress .bar {
+    -fx-background-color: #888;
+}
+
+/* Buttons */
+.timer-button {
+    -fx-font-size: 13px;
+    -fx-padding: 8 20;
+    -fx-cursor: hand;
+}
+
+.play-button {
+    -fx-background-color: #2a4a2a;
+    -fx-text-fill: #8c8;
+}
+
+.play-button:hover {
+    -fx-background-color: #3a5a3a;
+}
+
+.pause-button {
+    -fx-background-color: #4a4a2a;
+    -fx-text-fill: #cc8;
+}
+
+.pause-button:hover {
+    -fx-background-color: #5a5a3a;
+}
+
+.cancel-button {
+    -fx-background-color: #4a2a2a;
+    -fx-text-fill: #c88;
+}
+
+.cancel-button:hover {
+    -fx-background-color: #5a3a3a;
+}
+
+.cancel-button:disabled {
+    -fx-opacity: 0.3;
+}
+
+.session-label {
+    -fx-text-fill: #888;
+    -fx-font-size: 12px;
+    -fx-padding: 8 0 0 0;
+}
+
+/* Sleep */
+.huge-clock {
+    -fx-font-size: 70px;
+    -fx-text-fill: #ccc;
+}
+
+.wake-button {
+    -fx-background-color: transparent;
+    -fx-text-fill: #999;
+    -fx-font-size: 14px;
+    -fx-cursor: hand;
+}
+
+.wake-button:hover {
+    -fx-text-fill: #fff;
+}
+
+/* Tasks */
+.task-column {
+    -fx-background-color: #111;
+    -fx-border-color: #333;
+    -fx-border-width: 1;
+    -fx-padding: 12;
+    -fx-background-radius: 4;
+    -fx-border-radius: 4;
+}
+
+.panel-header {
+    -fx-text-fill: #eee;
+    -fx-font-size: 16px;
+    -fx-font-weight: bold;
+    -fx-padding: 0 0 5 0;
+}
+
+.task-scroll {
+    -fx-background-color: transparent;
+    -fx-background: transparent;
+}
+
+.task-scroll .viewport {
+    -fx-background-color: transparent;
+}
+
+.task-scroll .scroll-bar:vertical {
+    -fx-background-color: #111;
+}
+
+.task-scroll .scroll-bar:vertical .thumb {
+    -fx-background-color: #333;
+}
+
+.task-item {
+    -fx-background-color: #1a1a1a;
+    -fx-border-color: #2a2a2a;
+    -fx-border-width: 1;
+    -fx-padding: 8 10;
+    -fx-background-radius: 3;
+    -fx-border-radius: 3;
+}
+
+.task-title {
+    -fx-text-fill: #eee;
+    -fx-font-size: 14px;
+    -fx-font-weight: bold;
+}
+
+.task-description {
+    -fx-text-fill: #999;
+    -fx-font-size: 12px;
+    -fx-padding: 2 0 0 0;
+}
+
+.task-date {
+    -fx-text-fill: #777;
+    -fx-font-size: 11px;
+    -fx-padding: 2 0 0 0;
+}
+
+.commitment-label {
+    -fx-text-fill: #ccc;
+    -fx-font-size: 13px;
+}
+
+.remove-btn {
+    -fx-background-color: transparent;
+    -fx-text-fill: #c88;
+    -fx-border-color: transparent;
+    -fx-font-size: 13px;
+    -fx-cursor: hand;
+    -fx-padding: 2 6;
+}
+
+.remove-btn:hover {
+    -fx-text-fill: #f66;
+    -fx-background-color: #2a1a1a;
+}
+
+/* Study task panel */
+.study-task-panel {
+    -fx-background-color: #111;
+    -fx-border-color: #333;
+    -fx-border-width: 1;
+    -fx-background-radius: 4;
+    -fx-border-radius: 4;
+    -fx-max-width: 500;
+}
+
+.study-task-checkbox {
+    -fx-text-fill: #ccc;
+    -fx-font-size: 13px;
+    -fx-padding: 4 8;
+}
+
+.study-task-checkbox .box {
+    -fx-background-color: #222;
+    -fx-border-color: #555;
+}
+
+.study-task-checkbox:selected .mark {
+    -fx-background-color: #8c8;
+}
+
+/* Date validation error */
+.date-error {
+    -fx-text-fill: #e66;
+    -fx-font-size: 11px;
+    -fx-padding: 2 0 0 0;
+}

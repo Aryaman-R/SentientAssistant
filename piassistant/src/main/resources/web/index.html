@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sentient Assistant</title>
+    <meta name="description"
+        content="Sentient — AI-powered personal assistant with focus timer, task management, and voice control">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+    <!-- Sidebar -->
+    <nav class="sidebar" id="sidebar">
+        <div class="brand">SENTIENT</div>
+
+        <button class="nav-btn" id="nav-home" data-panel="home">
+            <span class="nav-icon">⌂</span>
+            <span class="nav-label">HOME</span>
+        </button>
+        <button class="nav-btn" id="nav-voice" data-panel="voice">
+            <span class="nav-icon">◉</span>
+            <span class="nav-label">VOICE</span>
+        </button>
+        <button class="nav-btn" id="nav-study" data-panel="study">
+            <span class="nav-icon">◉</span>
+            <span class="nav-label">STUDY</span>
+        </button>
+        <button class="nav-btn" id="nav-tasks" data-panel="tasks">
+            <span class="nav-icon">☰</span>
+            <span class="nav-label">TASKS</span>
+        </button>
+        <button class="nav-btn" id="nav-calendar" data-panel="calendar">
+            <span class="nav-icon">📅</span>
+            <span class="nav-label">CALENDAR</span>
+        </button>
+        <button class="nav-btn" id="nav-sleep" data-panel="sleep">
+            <span class="nav-icon">◑</span>
+            <span class="nav-label">SLEEP</span>
+        </button>
+        <button class="nav-btn" id="nav-spotify" data-panel="spotify">
+            <span class="nav-icon">♫</span>
+            <span class="nav-label">MUSIC</span>
+        </button>
+        <button class="nav-btn" id="nav-settings" data-panel="settings">
+            <span class="nav-icon">⚙</span>
+            <span class="nav-label">SETTINGS</span>
+        </button>
+
+        <div class="sidebar-spacer"></div>
+
+        <div class="connection-status" id="connectionStatus">
+            <span class="status-dot"></span>
+            <span class="status-text">CONNECTING</span>
+        </div>
+    </nav>
+
+    <!-- Content Area — panels are added/removed dynamically -->
+    <main class="content-area" id="contentArea">
+        <!-- Empty state -->
+        <div class="empty-state" id="emptyState">
+            <div class="empty-icon">◇</div>
+            <div class="empty-text">SELECT A MODULE</div>
+            <div class="empty-hint">Click sidebar tabs to open panels. Click again to close.</div>
+        </div>
+
+        <!-- HOME Panel -->
+        <section class="panel" id="panel-home" style="display:none">
+            <div class="panel-header">
+                <div class="panel-accent home-accent"></div>
+                <h2 class="panel-title">TERMINAL LINK</h2>
+                <button class="panel-close" data-panel="home">✕</button>
+            </div>
+            <div class="chat-area" id="chatArea"></div>
+            <div id="filePreviewArea" class="file-preview-area" style="display:none;">
+                <span id="filePreviewName"></span>
+                <button class="icon-btn" id="removeFileBtn">✕</button>
+            </div>
+            <div class="input-row">
+                <label for="chatAttach" class="action-btn attach-btn" title="Attach image">📎</label>
+                <input type="file" id="chatAttach" style="display:none" accept="image/*,.pdf,.txt,text/*">
+                <input type="text" class="chat-input" id="chatInput" placeholder="Enter command..." autocomplete="off">
+                <button class="action-btn record-btn" id="recordBtn" title="Voice Record">🎤</button>
+                <button class="action-btn stop-btn" id="stopBtn" title="Stop Response">⏹</button>
+                <button class="action-btn send-btn" id="sendBtn" title="Send">➤</button>
+            </div>
+        </section>
+
+        <!-- VOICE Panel — wake-word + barge-in conversational mode -->
+        <section class="panel" id="panel-voice" style="display:none">
+            <div class="panel-header">
+                <div class="panel-accent voice-accent"></div>
+                <h2 class="panel-title">VOICE</h2>
+                <button class="panel-close" data-panel="voice">✕</button>
+            </div>
+            <div class="voice-content">
+                <div class="voice-stage" id="voiceStage" data-state="off">
+                    <div class="voice-orb-wrap">
+                        <div class="voice-orb-ring"></div>
+                        <div class="voice-orb"></div>
+                    </div>
+                    <div class="voice-state-label" id="voiceStateLabel">DEACTIVATED</div>
+                    <div class="voice-transcript" id="voiceTranscript">Say "jarvis" to wake</div>
+                    <div class="voice-reply" id="voiceReply"></div>
+                </div>
+                <div class="voice-controls">
+                    <button class="voice-toggle-btn" id="voiceToggleBtn">▶ ACTIVATE WAKE MODE</button>
+                    <div class="voice-hint">
+                        While active, mic listens for the wake word. Speak any time the bot is talking to interrupt it.
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- STUDY Panel -->
+        <section class="panel" id="panel-study" style="display:none">
+            <div class="panel-header">
+                <div class="panel-accent study-accent"></div>
+                <h2 class="panel-title">FOCUS MODE</h2>
+                <button class="panel-close" data-panel="study">✕</button>
+            </div>
+            <div class="study-content">
+                <div class="quote-label" id="quoteLabel">"The secret of getting ahead is getting started." — Mark Twain
+                </div>
+
+                <div class="timer-container" id="timerContainer">
+                    <div class="huge-timer" id="timerLabel">25:00</div>
+                    <input type="text" class="timer-edit" id="timerEdit" style="display:none" placeholder="MM:SS">
+                </div>
+                <div class="status-hint">DOUBLE-CLICK TIMER TO EDIT</div>
+
+                <div class="progress-track">
+                    <div class="progress-bar" id="progressBar" style="width:100%"></div>
+                </div>
+
+                <div class="timer-controls">
+                    <button class="timer-btn play-btn" id="playPauseBtn">▶ START</button>
+                    <button class="timer-btn cancel-btn" id="cancelBtn" disabled>■ CANCEL</button>
+                </div>
+
+                <div class="session-label" id="sessionLabel">SESSIONS COMPLETED: 0</div>
+
+                <!-- Study Task Panel -->
+                <div class="study-task-panel">
+                    <div class="panel-sub-header">SESSION TASKS</div>
+                    <div class="study-task-list" id="studyTaskList">
+                        <div class="status-hint">No tasks. Add tasks in the TASKS tab.</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- TASKS Panel -->
+        <section class="panel" id="panel-tasks" style="display:none">
+            <div class="panel-header">
+                <div class="panel-accent tasks-accent"></div>
+                <h2 class="panel-title">TASKS</h2>
+                <button class="panel-close" data-panel="tasks">✕</button>
+            </div>
+            <div class="tasks-content">
+                <!-- Google Tasks connect banner -->
+                <div class="tasks-google-banner" id="tasksGoogleBanner">
+                    <span class="tasks-google-text" id="tasksGoogleText">Tasks stored locally.</span>
+                    <button class="timer-btn play-btn" id="tasksGoogleConnectBtn" style="display:none">CONNECT
+                        GOOGLE</button>
+                    <button class="timer-btn play-btn" id="tasksSyncBtn" style="display:none">↻ SYNC</button>
+                </div>
+
+                <!-- Task Lists Row -->
+                <div class="task-lists-row" id="taskListsRow">
+                    <!-- Task list cards will be injected here -->
+                </div>
+
+                <!-- New List Button -->
+                <div class="task-new-list-area">
+                    <button class="timer-btn play-btn" id="newListBtn">+ NEW LIST</button>
+                    <input type="text" class="form-input" id="newListInput" placeholder="List name..."
+                        style="display:none">
+                </div>
+
+                <!-- Commitments Section -->
+                <div class="commitments-section">
+                    <div class="panel-sub-header">COMMITMENTS</div>
+                    <div class="add-form commitment-form">
+                        <input type="text" class="form-input" id="commitmentInput" placeholder="Add commitment...">
+                        <button class="timer-btn play-btn add-btn" id="addCommitBtn">+ ADD</button>
+                    </div>
+                    <div class="commitment-list" id="commitmentList"></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- CALENDAR Panel -->
+        <section class="panel" id="panel-calendar" style="display:none">
+            <div class="panel-header">
+                <div class="panel-accent calendar-accent"></div>
+                <h2 class="panel-title">CALENDAR</h2>
+                <button class="panel-close" data-panel="calendar">✕</button>
+            </div>
+            <div class="calendar-content">
+                <!-- Auth Banner -->
+                <div class="cal-auth" id="calendarAuth">
+                    <div id="calendarAuthText">Checking calendar status...</div>
+                    <button id="calendarAuthBtn" class="timer-btn play-btn"
+                        style="display:none; margin-top:1rem;">CONNECT GOOGLE CALENDAR</button>
+                </div>
+
+                <!-- Main UI -->
+                <div id="calendarMain" style="display:none;">
+                    <div class="cal-toolbar">
+                        <button class="icon-btn" id="calPrevWeek">◀</button>
+                        <span class="cal-date-range" id="calDateRange">Loading...</span>
+                        <button class="icon-btn" id="calNextWeek">▶</button>
+                        <div class="cal-view-modes">
+                            <button class="cal-view-btn active" data-view="week">WEEK</button>
+                            <button class="cal-view-btn" data-view="month">MONTH</button>
+                            <button class="cal-view-btn" data-view="day">DAY</button>
+                        </div>
+                        <button class="timer-btn reset-btn" id="calAiBtn" style="margin-left:auto;">✨ AI
+                            Suggest</button>
+                    </div>
+
+                    <!-- AI Suggestion Area (Hidden by default) -->
+                    <div class="ai-suggestion-area" id="aiSuggestionArea" style="display:none;">
+                        <div class="ai-suggestion-header">
+                            <h3>AI Suggestions</h3>
+                            <button class="icon-btn" id="closeAiSuggestions">✕</button>
+                        </div>
+                        <div class="ai-suggestion-loading" id="aiSuggestionLoading" style="display:none;">Thinking...
+                        </div>
+                        <div class="ai-suggestion-list" id="aiSuggestionList"></div>
+                    </div>
+
+                    <div class="calendar-grid" id="calendarGrid">
+                        <!-- Days and events will be injected here via JS -->
+                    </div>
+
+                    <!-- Event hover tooltip -->
+                    <div class="cal-tooltip" id="calTooltip" style="display:none;"></div>
+
+                    <div class="cal-add-form" id="calAddForm">
+                        <input type="text" id="calTitleInput" class="form-input" placeholder="Event Title">
+                        <input type="text" id="calDescInput" class="form-input" placeholder="Description (opt)">
+                        <input type="datetime-local" id="calStartInput" class="form-input date-input">
+                        <input type="datetime-local" id="calEndInput" class="form-input date-input">
+                        <button id="addCalEventBtn" class="timer-btn play-btn add-btn">+ ADD EVENT</button>
+                        <button id="cancelEditBtn" class="timer-btn cancel-btn add-btn"
+                            style="display:none">CANCEL</button>
+                        <button id="deleteEditBtn" class="timer-btn reset-btn add-btn" style="display:none">🗑
+                            DELETE</button>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- SLEEP Panel -->
+        <section class="panel" id="panel-sleep" style="display:none">
+            <div class="panel-header">
+                <div class="panel-accent sleep-accent"></div>
+                <h2 class="panel-title">SYSTEM STANDBY</h2>
+                <button class="panel-close" data-panel="sleep">✕</button>
+            </div>
+            <div class="sleep-content">
+                <div class="huge-clock" id="sleepClock">00:00 AM</div>
+                <button class="wake-btn" id="wakeBtn">WAKE SYSTEM</button>
+            </div>
+        </section>
+
+        <!-- SPOTIFY Panel -->
+        <section class="panel" id="panel-spotify" style="display:none">
+            <div class="panel-header">
+                <div class="panel-accent spotify-accent"></div>
+                <h2 class="panel-title">MUSIC</h2>
+                <button class="panel-close" data-panel="spotify">✕</button>
+            </div>
+            <div class="spotify-content" id="spotifyContent">
+                <!-- Auth Banner (shown when not connected) -->
+                <div class="spotify-auth" id="spotifyAuth">
+                    <div class="spotify-auth-icon">♫</div>
+                    <div class="spotify-auth-text">Connect your Spotify account to get started</div>
+                    <button class="spotify-connect-btn" id="spotifyConnectBtn">CONNECT SPOTIFY</button>
+                </div>
+
+                <!-- Main UI (shown when connected) -->
+                <div class="spotify-main" id="spotifyMain" style="display:none">
+                    <!-- Search -->
+                    <div class="spotify-search-row">
+                        <input type="text" class="spotify-search" id="spotifySearch"
+                            placeholder="Search songs, artists, albums..." autocomplete="off">
+                        <button class="spotify-search-btn" id="spotifySearchBtn">⌕</button>
+                    </div>
+
+                    <!-- Tabs -->
+                    <div class="spotify-tabs">
+                        <button class="spotify-tab active" data-tab="playlists" id="tabPlaylists">YOUR
+                            PLAYLISTS</button>
+                        <button class="spotify-tab create-playlist-btn" id="createPlaylistBtn"
+                            title="Create new playlist">+</button>
+                        <button class="spotify-tab" data-tab="library" id="tabLibrary">LIBRARY</button>
+                        <button class="spotify-tab" data-tab="featured" id="tabFeatured">FEATURED</button>
+                        <button class="spotify-tab" data-tab="aidj" id="tabAiDj">AI DJ</button>
+                        <button class="spotify-tab" data-tab="search" id="tabSearch"
+                            style="display:none">SEARCH</button>
+                    </div>
+
+                    <!-- Tab Content -->
+                    <div class="spotify-tab-content" id="spotifyTabContent">
+                        <!-- Create Playlist Form (inline, hidden by default) -->
+                        <div class="create-playlist-row" id="createPlaylistRow" style="display:none">
+                            <input type="text" class="create-playlist-input" id="createPlaylistInput"
+                                placeholder="New playlist name..." autocomplete="off">
+                            <button class="create-playlist-submit" id="createPlaylistSubmit">CREATE</button>
+                            <button class="create-playlist-cancel" id="createPlaylistCancel">✕</button>
+                        </div>
+                        <!-- Playlists grid -->
+                        <div class="spotify-grid" id="spotifyPlaylistGrid"></div>
+                        <!-- Featured grid -->
+                        <div class="spotify-grid" id="spotifyFeaturedGrid" style="display:none"></div>
+                        <!-- Search results -->
+                        <div class="spotify-track-list" id="spotifySearchResults" style="display:none"></div>
+                        <!-- AI DJ -->
+                        <div class="spotify-ai-dj" id="spotifyAiDj" style="display:none">
+                            <div class="ai-dj-header">
+                                <div class="ai-dj-icon">🎧</div>
+                                <div class="ai-dj-title">AI DJ MODE</div>
+                                <div class="ai-dj-subtitle">Describe a mood, activity, or vibe and let AI pick your
+                                    songs</div>
+                            </div>
+                            <div class="ai-dj-input-row">
+                                <input type="text" class="ai-dj-input" id="aiDjInput"
+                                    placeholder="e.g. chill study vibes, energetic workout, late night drives..."
+                                    autocomplete="off">
+                                <button class="ai-dj-btn" id="aiDjBtn">LET'S GO</button>
+                            </div>
+                            <div class="ai-dj-status" id="aiDjStatus"></div>
+                            <div class="spotify-track-list" id="aiDjResults"></div>
+                        </div>
+                        <!-- Library view: Saved + Recently Played -->
+                        <div class="spotify-library" id="spotifyLibrary" style="display:none">
+                            <div class="spotify-sub-tabs">
+                                <button class="spotify-sub-tab active" data-libtab="saved" id="libtabSaved">♥ SAVED</button>
+                                <button class="spotify-sub-tab" data-libtab="recent" id="libtabRecent">↻ RECENTLY PLAYED</button>
+                            </div>
+                            <div class="spotify-track-list" id="spotifySavedList"></div>
+                            <div class="spotify-track-list" id="spotifyRecentList" style="display:none"></div>
+                        </div>
+                        <!-- Playlist tracks view -->
+                        <div class="spotify-track-list" id="spotifyPlaylistTracks" style="display:none">
+                            <button class="spotify-back-btn" id="spotifyBackBtn">← BACK</button>
+                            <div class="spotify-playlist-name" id="spotifyPlaylistName"></div>
+                            <div class="spotify-devmode-banner" id="spotifyDevModeBanner" style="display:none">
+                                <div class="spotify-devmode-title">⚠ Spotify dev-mode restriction</div>
+                                <div class="spotify-devmode-text">
+                                    Spotify locks the playlist-tracks endpoint for apps in development mode.
+                                    Apply for extended quota at
+                                    <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">developer.spotify.com/dashboard</a>
+                                    (your app → Request Extension). Approval usually takes 1–2 weeks.
+                                    Until then, browse <b>LIBRARY</b> instead — your Saved + Recently Played tracks still work.
+                                </div>
+                            </div>
+                            <div id="spotifyTrackItems"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Now Playing -->
+                <div class="spotify-now-playing" id="spotifyNowPlaying" style="display:none">
+                    <div class="now-playing-art" id="nowPlayingArt"></div>
+                    <div class="now-playing-info">
+                        <div class="now-playing-title" id="nowPlayingTitle">—</div>
+                        <div class="now-playing-artist" id="nowPlayingArtist">—</div>
+                    </div>
+                    <div class="now-playing-controls">
+                        <button class="np-btn" id="npPrev" title="Previous">⏮</button>
+                        <button class="np-btn np-play" id="npPlayPause" title="Play/Pause">▶</button>
+                        <button class="np-btn" id="npNext" title="Next">⏭</button>
+                        <select class="np-device-select" id="npDeviceSelect" title="Select playback device">
+                            <option value="">No devices</option>
+                        </select>
+                    </div>
+                    <div class="now-playing-progress">
+                        <div class="np-progress-bar" id="npProgressBar"></div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- SETTINGS Panel -->
+        <section class="panel" id="panel-settings" style="display:none">
+            <div class="panel-header">
+                <div class="panel-accent settings-accent"></div>
+                <h2 class="panel-title">SETTINGS</h2>
+                <button class="panel-close" data-panel="settings">✕</button>
+            </div>
+            <div class="settings-content">
+                <div class="settings-group">
+                    <div class="panel-sub-header">AI & CHAT</div>
+                    <label class="setting-item">
+                        <span class="setting-label">Conversation Mode (Auto-Mic)</span>
+                        <input type="checkbox" id="settingConvMode" class="setting-toggle" checked>
+                    </label>
+                    <label class="setting-item">
+                        <span class="setting-label">Chat Engine</span>
+                        <select id="settingEngine" class="setting-select">
+                            <option value="groq">Groq (built-in)</option>
+                            <option value="openclaw">OpenClaw (local)</option>
+                        </select>
+                    </label>
+                    <label class="setting-item">
+                        <span class="setting-label">Model Override (Groq only)</span>
+                        <select id="settingModel" class="setting-select">
+                            <option value="AUTO">Auto (Router)</option>
+                            <option value="CHAT">Llama 3.3 70B (Chat)</option>
+                            <option value="THINK">Qwen 32B (Thinking)</option>
+                        </select>
+                    </label>
+                </div>
+
+                <!-- ── OpenClaw configuration ─────────────────────── -->
+                <div class="settings-group" id="settingsOpenClaw">
+                    <div class="panel-sub-header">OPENCLAW</div>
+                    <div class="setting-status-row">
+                        <span class="setting-label">Gateway Status</span>
+                        <span class="setting-status" id="openclawStatusBadge">CHECKING…</span>
+                        <button class="timer-btn play-btn" id="openclawRefreshBtn" style="margin-left:auto">↻ REFRESH</button>
+                    </div>
+                    <div class="setting-hint" id="openclawHint">
+                        OpenClaw is a local agent harness installed on the master device. The UI here writes
+                        <code>~/.config/openclaw/openclaw.json5</code> for you and restarts the gateway.
+                        If it isn't installed yet, run:
+                        <code class="code-block">curl -fsSL https://openclaw.ai/install.sh | bash</code>
+                    </div>
+
+                    <label class="setting-item">
+                        <span class="setting-label">Provider</span>
+                        <select id="openclawProvider" class="setting-select">
+                            <option value="anthropic">Anthropic (Claude)</option>
+                            <option value="openai">OpenAI (GPT)</option>
+                            <option value="google">Google (Gemini)</option>
+                            <option value="groq">Groq</option>
+                            <option value="openrouter">OpenRouter</option>
+                            <option value="xai">xAI (Grok)</option>
+                            <option value="deepseek">DeepSeek</option>
+                            <option value="moonshot">Moonshot</option>
+                            <option value="custom">Custom (OpenAI-compatible)</option>
+                        </select>
+                    </label>
+                    <label class="setting-item">
+                        <span class="setting-label">API Key</span>
+                        <input type="password" class="form-input setting-input" id="openclawApiKey" placeholder="sk-..." autocomplete="off">
+                    </label>
+                    <label class="setting-item">
+                        <span class="setting-label">Model</span>
+                        <input type="text" class="form-input setting-input" id="openclawModel" placeholder="claude-sonnet-4-5" autocomplete="off">
+                    </label>
+                    <label class="setting-item" id="openclawBaseUrlRow" style="display:none">
+                        <span class="setting-label">Base URL</span>
+                        <input type="text" class="form-input setting-input" id="openclawBaseUrl" placeholder="https://api.example.com/v1" autocomplete="off">
+                    </label>
+                    <label class="setting-item" id="openclawApiTypeRow" style="display:none">
+                        <span class="setting-label">API Protocol</span>
+                        <select id="openclawApiType" class="setting-select">
+                            <option value="openai-completions">openai-completions</option>
+                            <option value="anthropic-messages">anthropic-messages</option>
+                        </select>
+                    </label>
+                    <label class="setting-item">
+                        <span class="setting-label">Gateway Auth Token</span>
+                        <input type="password" class="form-input setting-input" id="openclawGatewayToken" placeholder="(leave blank if gateway has no auth)" autocomplete="off">
+                    </label>
+                    <div class="settings-actions">
+                        <button class="timer-btn play-btn" id="openclawSaveBtn">SAVE & RESTART GATEWAY</button>
+                        <button class="timer-btn cancel-btn" id="openclawTestBtn">TEST CHAT</button>
+                    </div>
+                    <div id="openclawSaveStatus" class="setting-feedback"></div>
+                </div>
+
+                <!-- ── Composio skills ─────────────────────────────── -->
+                <div class="settings-group" id="settingsComposio">
+                    <div class="panel-sub-header">SKILLS · COMPOSIO</div>
+                    <div class="setting-hint">
+                        Composio provides hundreds of tool integrations (GitHub, Gmail, Slack, Notion, etc.) to
+                        OpenClaw via MCP. Paste your consumer key from
+                        <a href="https://dashboard.composio.dev/" target="_blank" rel="noopener">dashboard.composio.dev</a>,
+                        then toggle the toolkits you want exposed to the AI.
+                    </div>
+                    <label class="setting-item">
+                        <span class="setting-label">Consumer Key</span>
+                        <input type="password" class="form-input setting-input" id="composioKey" placeholder="ck_..." autocomplete="off">
+                    </label>
+
+                    <div class="composio-grid" id="composioGrid"><!-- toolkit cards injected by JS --></div>
+
+                    <div class="settings-actions composio-extra">
+                        <input type="text" class="form-input setting-input composio-add-input" id="composioAddInput" placeholder="Add another toolkit (e.g. asana)">
+                        <button class="timer-btn play-btn" id="composioAddBtn">+ ADD</button>
+                    </div>
+                    <div class="settings-actions">
+                        <button class="timer-btn play-btn" id="composioSaveBtn">SAVE SKILLS</button>
+                    </div>
+                    <div id="composioSaveStatus" class="setting-feedback"></div>
+                </div>
+
+                <!-- ── Master server (for remote clients) ─────────── -->
+                <div class="settings-group" id="settingsMaster">
+                    <div class="panel-sub-header">MASTER SERVER</div>
+                    <div class="setting-hint">
+                        The Sentient app runs on one "master" device. Other browsers connect here. If you're
+                        opening this page from a remote device, enter the master's address (e.g.
+                        <code>192.168.1.42:7070</code>) and reload.
+                    </div>
+                    <label class="setting-item">
+                        <span class="setting-label">Master Server</span>
+                        <input type="text" class="form-input setting-input" id="masterServerUrl" placeholder="host:port (leave blank for current host)" autocomplete="off">
+                    </label>
+                    <div class="settings-actions">
+                        <button class="timer-btn play-btn" id="masterServerSaveBtn">SAVE & RELOAD</button>
+                        <button class="timer-btn cancel-btn" id="masterServerClearBtn">USE THIS HOST</button>
+                    </div>
+                    <div class="setting-feedback" id="masterServerStatus"></div>
+                </div>
+
+                <div class="settings-group">
+                    <div class="panel-sub-header">AUDIO</div>
+                    <div class="setting-status-row">
+                        <span class="setting-label">Devices appear after permission is granted.</span>
+                        <button class="timer-btn play-btn" id="settingsRefreshDevicesBtn" style="margin-left:auto">↻ REFRESH DEVICES</button>
+                    </div>
+                    <label class="setting-item">
+                        <span class="setting-label">Microphone Input</span>
+                        <select id="settingMic" class="setting-select">
+                            <option value="enabled">Enabled</option>
+                            <option value="muted">Muted (Disconnected)</option>
+                        </select>
+                    </label>
+                    <label class="setting-item">
+                        <span class="setting-label">Mic Device</span>
+                        <select id="settingMicDevice" class="setting-select">
+                            <option value="default">System Default</option>
+                        </select>
+                    </label>
+                    <label class="setting-item">
+                        <span class="setting-label">Text-to-Speech</span>
+                        <input type="checkbox" id="settingTts" class="setting-toggle" checked>
+                    </label>
+                    <label class="setting-item">
+                        <span class="setting-label">Output Speaker</span>
+                        <select id="settingSpeaker" class="setting-select">
+                            <option value="default">System Default</option>
+                        </select>
+                    </label>
+                </div>
+
+                <div class="settings-group">
+                    <div class="panel-sub-header">INTEGRATIONS</div>
+                    <div class="settings-integrations">
+                        <button class="timer-btn play-btn" id="settingsGoogleTasksBtn">CONNECT GOOGLE TASKS</button>
+                        <button class="timer-btn play-btn" id="settingsGoogleCalBtn">CONNECT GOOGLE CALENDAR</button>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://sdk.scdn.co/spotify-player.js"></script>
+    <script src="app.js"></script>
+</body>
+
+</html>
