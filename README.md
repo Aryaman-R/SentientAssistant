@@ -65,6 +65,17 @@ openclaw gateway start
 
 In Settings → OPENCLAW pick a provider, paste your API key, hit **SAVE & RESTART GATEWAY**. The badge flips to `ONLINE`. Toggle the **Chat Engine** dropdown to "OpenClaw (local)".
 
+The full setup guide — including **gateway auth tokens**, **connecting to a remote OpenClaw on a VPS**, **Tailscale Funnel** for a public URL, and the **shared-password login** — lives in [`SETUP_OPENCLAW.md`](SETUP_OPENCLAW.md). Read it before exposing the app outside your LAN.
+
+### Remote access summary
+
+| Mode | How |
+|---|---|
+| LAN | Open `http://<master-ip>:7070` from any device on the same network. |
+| Tailnet (private) | Install Tailscale on every device. Open `http://<master-tailscale-name>:7070`. |
+| Public internet | Enable Tailscale Funnel from `Settings → REMOTE ACCESS`. Set a shared password first under `Settings → DEVICE LOGIN`. |
+| Remote OpenClaw | Run OpenClaw on a VPS/another device. In `Settings → OPENCLAW`, toggle **Use Remote Gateway** and paste the URL + auth token. |
+
 ## Configuration
 
 ### `.env` (required keys)

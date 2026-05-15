@@ -431,10 +431,29 @@
                         <button class="timer-btn play-btn" id="openclawRefreshBtn" style="margin-left:auto">↻ REFRESH</button>
                     </div>
                     <div class="setting-hint" id="openclawHint">
-                        OpenClaw is a local agent harness installed on the master device. The UI here writes
-                        <code>~/.config/openclaw/openclaw.json5</code> for you and restarts the gateway.
+                        OpenClaw is an agent harness that proxies your chats to any provider you configure
+                        (Anthropic, OpenAI, Groq, etc.). The UI below writes
+                        <code>~/.config/openclaw/openclaw.json5</code> on the master and restarts the gateway.
                         If it isn't installed yet, run:
                         <code class="code-block">curl -fsSL https://openclaw.ai/install.sh | bash</code>
+                        See <code>SETUP_OPENCLAW.md</code> for the full guide, including remote gateways.
+                    </div>
+
+                    <!-- Local vs Remote toggle -->
+                    <label class="setting-item">
+                        <span class="setting-label">Use Remote Gateway</span>
+                        <input type="checkbox" id="openclawUseRemote" class="setting-toggle">
+                    </label>
+                    <label class="setting-item openclaw-remote-only" id="openclawRemoteUrlRow" style="display:none">
+                        <span class="setting-label">Remote URL</span>
+                        <input type="text" class="form-input setting-input" id="openclawRemoteUrl" placeholder="http://vps.example.com:18789" autocomplete="off">
+                    </label>
+                    <label class="setting-item openclaw-remote-only" id="openclawRemoteTokenRow" style="display:none">
+                        <span class="setting-label">Remote Auth Token</span>
+                        <input type="password" class="form-input setting-input" id="openclawRemoteToken" placeholder="bearer token (matches gateway.auth.token on remote)" autocomplete="off">
+                    </label>
+                    <div class="settings-actions openclaw-remote-only" id="openclawConnectionActionsRow" style="display:none">
+                        <button class="timer-btn play-btn" id="openclawConnectionSaveBtn">SAVE CONNECTION</button>
                     </div>
 
                     <label class="setting-item">
@@ -507,6 +526,52 @@
                     <div id="composioSaveStatus" class="setting-feedback"></div>
                 </div>
 
+                <!-- ── Tailscale Funnel (public URL on the master) ── -->
+                <div class="settings-group" id="settingsTailscale">
+                    <div class="panel-sub-header">REMOTE ACCESS · TAILSCALE FUNNEL</div>
+                    <div class="setting-hint">
+                        Tailscale Funnel exposes the master device on a permanent public HTTPS URL
+                        (e.g. <code>https://your-pi.tail-net.ts.net</code>) without opening router ports.
+                        It requires Tailscale installed and logged in on the master.
+                        Enable shared-password login below before turning Funnel on — Funnel publishes
+                        the app to the public internet.
+                    </div>
+                    <div class="setting-status-row">
+                        <span class="setting-label">Tailscale Status</span>
+                        <span class="setting-status" id="tailscaleStatusBadge">CHECKING…</span>
+                        <button class="timer-btn play-btn" id="tailscaleRefreshBtn" style="margin-left:auto">↻ REFRESH</button>
+                    </div>
+                    <div class="setting-feedback" id="tailscaleUrlLine"></div>
+                    <div class="settings-actions">
+                        <button class="timer-btn play-btn" id="tailscaleEnableBtn">ENABLE FUNNEL</button>
+                        <button class="timer-btn cancel-btn" id="tailscaleDisableBtn">DISABLE FUNNEL</button>
+                    </div>
+                    <div class="setting-feedback" id="tailscaleStatus"></div>
+                </div>
+
+                <!-- ── Device login / shared password ─────────────── -->
+                <div class="settings-group" id="settingsAuth">
+                    <div class="panel-sub-header">DEVICE LOGIN</div>
+                    <div class="setting-hint">
+                        Set a shared password to gate access to this app. All devices must log in once;
+                        the resulting token is stored in the browser. Leave blank to disable auth (LAN only).
+                    </div>
+                    <div class="setting-status-row">
+                        <span class="setting-label">Auth Status</span>
+                        <span class="setting-status" id="authStatusBadge">CHECKING…</span>
+                    </div>
+                    <label class="setting-item">
+                        <span class="setting-label">Shared Password</span>
+                        <input type="password" class="form-input setting-input" id="authPasswordInput" placeholder="set a password (min 6 chars)" autocomplete="new-password">
+                    </label>
+                    <div class="settings-actions">
+                        <button class="timer-btn play-btn" id="authSaveBtn">SET PASSWORD</button>
+                        <button class="timer-btn cancel-btn" id="authClearBtn">DISABLE LOGIN</button>
+                        <button class="timer-btn cancel-btn" id="authLogoutBtn">LOG OUT THIS DEVICE</button>
+                    </div>
+                    <div class="setting-feedback" id="authFeedback"></div>
+                </div>
+
                 <!-- ── Master server (for remote clients) ─────────── -->
                 <div class="settings-group" id="settingsMaster">
                     <div class="panel-sub-header">MASTER SERVER</div>
@@ -555,6 +620,25 @@
                             <option value="default">System Default</option>
                         </select>
                     </label>
+                </div>
+
+                <!-- ── Connected devices (cross-tab screen capture) ── -->
+                <div class="settings-group" id="settingsDevices">
+                    <div class="panel-sub-header">CONNECTED DEVICES</div>
+                    <div class="setting-hint">
+                        Each browser tab logged in as you appears here. Click VIEW SCREEN on a remote
+                        device to ask it to share a single snapshot of its screen — the user on that
+                        device will see a browser prompt and can accept or decline. See
+                        <code>DEVICE_CONTROL.md</code> for the design + roadmap for full remote control.
+                    </div>
+                    <label class="setting-item">
+                        <span class="setting-label">This device's name</span>
+                        <input type="text" class="form-input setting-input" id="deviceNameInput" placeholder="My Mac" autocomplete="off">
+                    </label>
+                    <div class="settings-actions">
+                        <button class="timer-btn play-btn" id="deviceNameSaveBtn">SAVE NAME</button>
+                    </div>
+                    <div class="devices-list" id="devicesList"></div>
                 </div>
 
                 <div class="settings-group">

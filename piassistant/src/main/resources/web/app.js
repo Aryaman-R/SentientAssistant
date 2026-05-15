@@ -2,6 +2,45 @@
    Sentient Assistant — Frontend Application
    ═══════════════════════════════════════════════════ */
 
+// ── Auth: bootstrap (runs before anything else) ─────────
+// If a shared password is set on the master, every fetch + WS must carry the
+// device token. We probe /api/auth/status synchronously-ish: if auth is required
+// and we don't have a valid token, we bounce to /login.
+(function bootstrapAuth() {
+    const TOKEN_KEY = 'sentient_token';
+    function getToken() { return localStorage.getItem(TOKEN_KEY) || ''; }
+    window.getSentientToken = getToken;
+    window.setSentientToken = (t) => localStorage.setItem(TOKEN_KEY, t);
+    window.clearSentientToken = () => localStorage.removeItem(TOKEN_KEY);
+
+    // Intercept fetch to attach the auth header on every /api/* call.
+    const origFetch = window.fetch.bind(window);
+    window.fetch = function (input, init) {
+        init = init || {};
+        const headers = new Headers(init.headers || {});
+        const url = typeof input === 'string' ? input : (input && input.url) || '';
+        const isApi = url.includes('/api/');
+        if (isApi && !headers.has('X-Sentient-Token')) {
+            const t = getToken();
+            if (t) headers.set('X-Sentient-Token', t);
+        }
+        init.headers = headers;
+        return origFetch(input, init);
+    };
+
+    // On boot, ask the server if we need to log in.
+    const masterHost = (localStorage.getItem('sentient_masterHost') || '').trim() || location.host;
+    const base = masterHost === location.host ? '' : location.protocol + '//' + masterHost;
+    origFetch(base + '/api/auth/status', {
+        headers: getToken() ? { 'X-Sentient-Token': getToken() } : {}
+    }).then(r => r.json()).then(data => {
+        if (data.required && !data.loggedIn) {
+            // Save where we wanted to be, then go to the login page.
+            location.replace(base + '/login');
+        }
+    }).catch(() => { /* server unreachable, let normal UI surface that */ });
+})();
+
 // ── Partition Manager (Smart 2D Grid + Drag & Drop) ─
 
 const activePanels = new Set();
@@ -246,13 +285,17 @@ window.api = function api(path) { return getMasterHttpBase() + path; };
 
 function connectWS() {
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(`${protocol}//${getMasterHost()}/ws`);
+    const tok = (typeof getSentientToken === 'function') ? getSentientToken() : '';
+    const tokQuery = tok ? ('?token=' + encodeURIComponent(tok)) : '';
+    ws = new WebSocket(`${protocol}//${getMasterHost()}/ws${tokQuery}`);
 
     ws.onopen = () => {
         console.log('[WS] Connected');
         setConnectionStatus(true);
-        
+
         ws.send(JSON.stringify({ type: 'init', sessionId: tabSessionId }));
+        // Announce this device so other clients can target it for screen capture / control.
+        try { registerDevice(); } catch (e) { console.warn('[devices] register failed', e); }
         
         // Keep-alive for Tailscale Funnel / Proxies
         if (ws.pingInterval) clearInterval(ws.pingInterval);
@@ -294,6 +337,104 @@ function setConnectionStatus(connected) {
     }
 }
 
+// ── Cross-device screen access (limited: browser-side getDisplayMedia) ─
+// Each browser tab announces itself as a "device". Another tab can ask the
+// master to forward a screen-capture request; this tab pops the browser's
+// screen-share consent dialog, grabs one frame, sends back JPEG base64.
+// True remote-control of the OS is out of scope — see DEVICE_CONTROL.md.
+function deviceDisplayName() {
+    const saved = localStorage.getItem('sentient_deviceName');
+    if (saved) return saved;
+    const ua = navigator.userAgent || '';
+    let name = 'Browser';
+    if (/Macintosh|Mac OS X/.test(ua)) name = 'Mac';
+    else if (/Windows/.test(ua)) name = 'Windows PC';
+    else if (/Android/.test(ua)) name = 'Android';
+    else if (/iPhone|iPad/.test(ua)) name = 'iOS';
+    else if (/Linux/.test(ua)) name = 'Linux';
+    return `${name} · ${tabSessionId.slice(-5)}`;
+}
+function registerDevice() {
+    sendWS({
+        type: 'register_device',
+        name: deviceDisplayName(),
+        platform: navigator.platform || '',
+        capabilities: ['screen-capture-getDisplayMedia']
+    });
+}
+let knownDevices = [];
+function updateDeviceList(list) {
+    knownDevices = list || [];
+    renderDeviceList();
+}
+function renderDeviceList() {
+    const el = document.getElementById('devicesList');
+    if (!el) return;
+    if (!knownDevices.length) {
+        el.innerHTML = '<div class="setting-hint">No other devices connected.</div>';
+        return;
+    }
+    el.innerHTML = knownDevices.map(d => `
+        <div class="device-row">
+            <span class="device-name">${escapeHtml(d.name || 'Device')}</span>
+            <span class="device-meta">${escapeHtml(d.platform || '')}</span>
+            <button class="timer-btn play-btn device-snap-btn" data-session="${escapeHtml(d.sessionId)}">VIEW SCREEN</button>
+        </div>`).join('');
+    el.querySelectorAll('.device-snap-btn').forEach(b => {
+        b.addEventListener('click', () => requestScreenSnapshot(b.dataset.session));
+    });
+}
+async function requestScreenSnapshot(targetSessionId) {
+    const requestId = 'r' + Date.now() + Math.random().toString(16).slice(2, 8);
+    pendingScreenRequests[requestId] = (frameBase64, deviceName) => {
+        showSnapshot(frameBase64, deviceName);
+    };
+    sendWS({ type: 'request_screen', targetSessionId, requestId });
+}
+const pendingScreenRequests = {};
+async function handleCaptureScreen(msg) {
+    // We were asked to capture our own screen and send it back.
+    let frameBase64 = '';
+    try {
+        const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+        const track = stream.getVideoTracks()[0];
+        // Wait one tick so the frame is available.
+        await new Promise(r => setTimeout(r, 200));
+        const settings = track.getSettings();
+        const canvas = document.createElement('canvas');
+        canvas.width = settings.width || 1280;
+        canvas.height = settings.height || 720;
+        const video = document.createElement('video');
+        video.srcObject = stream;
+        await video.play();
+        canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+        frameBase64 = canvas.toDataURL('image/jpeg', 0.6);
+        track.stop();
+    } catch (e) {
+        console.warn('[devices] capture denied or failed', e);
+    }
+    sendWS({
+        type: 'screen_frame',
+        requestId: msg.requestId,
+        requesterSessionId: msg.requesterSessionId,
+        frame: frameBase64,
+        deviceName: deviceDisplayName(),
+        ok: !!frameBase64
+    });
+}
+function showSnapshot(dataUrl, deviceName) {
+    if (!dataUrl) {
+        alert('Remote device did not return a frame (user may have denied the screen-share prompt).');
+        return;
+    }
+    const w = window.open('', '_blank', 'width=900,height=700');
+    if (w) {
+        w.document.write(`<title>${escapeHtml(deviceName || 'remote screen')}</title>
+            <body style="margin:0;background:#000;display:flex;align-items:center;justify-content:center;height:100vh">
+            <img src="${dataUrl}" style="max-width:100%;max-height:100%"></body>`);
+    }
+}
+
 function handleWSMessage(msg) {
     switch (msg.type) {
         case 'system':
@@ -332,6 +473,21 @@ function handleWSMessage(msg) {
                     .finally(() => { try { recognition.start(); } catch (e) {} });
             }
             break;
+        case 'device_list':
+            // Filter out ourselves; render the rest.
+            updateDeviceList((msg.devices || []).filter(d => d.sessionId !== tabSessionId));
+            break;
+        case 'capture_screen':
+            handleCaptureScreen(msg);
+            break;
+        case 'screen_frame': {
+            const cb = pendingScreenRequests[msg.requestId];
+            if (cb) {
+                cb(msg.frame, msg.deviceName);
+                delete pendingScreenRequests[msg.requestId];
+            }
+            break;
+        }
     }
 }
 
@@ -2595,6 +2751,204 @@ async function claimChosenMic() {
     }
 }
 
+// ── Device Login (shared password) UI ───────────────────
+const authStatusBadge = document.getElementById('authStatusBadge');
+const authPasswordInput = document.getElementById('authPasswordInput');
+const authSaveBtn = document.getElementById('authSaveBtn');
+const authClearBtn = document.getElementById('authClearBtn');
+const authLogoutBtn = document.getElementById('authLogoutBtn');
+const authFeedback = document.getElementById('authFeedback');
+
+function setAuthBadge(state, text) {
+    if (!authStatusBadge) return;
+    authStatusBadge.className = 'setting-status status-' + state;
+    authStatusBadge.textContent = text;
+}
+
+async function refreshAuthStatus() {
+    if (!authStatusBadge) return;
+    setAuthBadge('checking', 'CHECKING…');
+    try {
+        const r = await fetch(api('/api/auth/status'));
+        const data = await r.json();
+        if (data.required) {
+            setAuthBadge(data.loggedIn ? 'online' : 'error', data.loggedIn ? 'LOGGED IN' : 'NOT LOGGED IN');
+        } else {
+            setAuthBadge('offline', 'LOGIN DISABLED');
+        }
+    } catch (e) {
+        setAuthBadge('error', 'SERVER UNREACHABLE');
+    }
+}
+if (authSaveBtn) {
+    authSaveBtn.addEventListener('click', async () => {
+        const pw = (authPasswordInput && authPasswordInput.value || '').trim();
+        if (pw.length < 6) {
+            authFeedback.className = 'setting-feedback error';
+            authFeedback.textContent = 'Password must be at least 6 characters.';
+            return;
+        }
+        authFeedback.className = 'setting-feedback';
+        authFeedback.textContent = 'Saving…';
+        try {
+            const r = await fetch(api('/api/auth/password'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ password: pw })
+            });
+            const data = await r.json();
+            if (!r.ok || data.error) {
+                authFeedback.className = 'setting-feedback error';
+                authFeedback.textContent = data.error || ('Save failed (HTTP ' + r.status + ')');
+                return;
+            }
+            // Setting/changing the password revokes all prior tokens — we need to log
+            // back in on THIS device to keep using the app.
+            const login = await fetch(api('/api/auth/login'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ password: pw })
+            }).then(x => x.json());
+            if (login && login.token) {
+                if (typeof setSentientToken === 'function') setSentientToken(login.token);
+            }
+            authPasswordInput.value = '';
+            authFeedback.className = 'setting-feedback success';
+            authFeedback.textContent = 'Password set. All other devices must log in again.';
+            refreshAuthStatus();
+        } catch (e) {
+            authFeedback.className = 'setting-feedback error';
+            authFeedback.textContent = 'Backend unreachable.';
+        }
+    });
+}
+if (authClearBtn) {
+    authClearBtn.addEventListener('click', async () => {
+        if (!confirm('Disable login? Anyone with network access will be able to use this app.')) return;
+        authFeedback.className = 'setting-feedback';
+        authFeedback.textContent = 'Disabling…';
+        try {
+            const r = await fetch(api('/api/auth/password'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ password: '' })
+            });
+            if (!r.ok) {
+                authFeedback.className = 'setting-feedback error';
+                authFeedback.textContent = 'Failed to disable (HTTP ' + r.status + ')';
+                return;
+            }
+            if (typeof clearSentientToken === 'function') clearSentientToken();
+            authFeedback.className = 'setting-feedback success';
+            authFeedback.textContent = 'Login disabled.';
+            refreshAuthStatus();
+        } catch (e) {
+            authFeedback.className = 'setting-feedback error';
+            authFeedback.textContent = 'Backend unreachable.';
+        }
+    });
+}
+if (authLogoutBtn) {
+    authLogoutBtn.addEventListener('click', async () => {
+        try { await fetch(api('/api/auth/logout'), { method: 'POST' }); } catch (e) {}
+        if (typeof clearSentientToken === 'function') clearSentientToken();
+        location.href = '/login';
+    });
+}
+setTimeout(refreshAuthStatus, 1500);
+
+// ── Tailscale Funnel UI ─────────────────────────────────
+const tailscaleStatusBadge = document.getElementById('tailscaleStatusBadge');
+const tailscaleEnableBtn = document.getElementById('tailscaleEnableBtn');
+const tailscaleDisableBtn = document.getElementById('tailscaleDisableBtn');
+const tailscaleRefreshBtn = document.getElementById('tailscaleRefreshBtn');
+const tailscaleStatusEl = document.getElementById('tailscaleStatus');
+const tailscaleUrlLine = document.getElementById('tailscaleUrlLine');
+
+function setTailscaleBadge(state, text) {
+    if (!tailscaleStatusBadge) return;
+    tailscaleStatusBadge.className = `setting-status status-${state}`;
+    tailscaleStatusBadge.textContent = text;
+}
+
+async function refreshTailscaleStatus() {
+    if (!tailscaleStatusBadge) return;
+    setTailscaleBadge('checking', 'CHECKING…');
+    if (tailscaleUrlLine) tailscaleUrlLine.textContent = '';
+    try {
+        const r = await fetch(api('/api/tailscale/status'));
+        const data = await r.json();
+        if (!data.installed) {
+            setTailscaleBadge('error', 'NOT INSTALLED');
+            if (tailscaleUrlLine) tailscaleUrlLine.innerHTML = 'Install Tailscale → <a href="https://tailscale.com/download" target="_blank" rel="noopener">tailscale.com/download</a>';
+            return;
+        }
+        if (!data.loggedIn) {
+            setTailscaleBadge('offline', 'NOT LOGGED IN');
+            if (tailscaleUrlLine) tailscaleUrlLine.textContent = 'Run `tailscale up` on the master device.';
+            return;
+        }
+        if (data.funnelEnabled && data.funnelUrl) {
+            setTailscaleBadge('online', 'FUNNEL ENABLED');
+            tailscaleUrlLine.innerHTML = `Public URL: <a href="${data.funnelUrl}" target="_blank" rel="noopener">${data.funnelUrl}</a>`;
+        } else {
+            setTailscaleBadge('offline', 'FUNNEL OFF');
+            if (data.hintUrl && tailscaleUrlLine) {
+                tailscaleUrlLine.innerHTML = `Tailnet URL (Tailscale-only): <a href="${data.hintUrl}" target="_blank" rel="noopener">${data.hintUrl}</a>`;
+            } else if (tailscaleUrlLine) {
+                tailscaleUrlLine.textContent = data.error || '';
+            }
+        }
+    } catch (e) {
+        setTailscaleBadge('error', 'SERVER UNREACHABLE');
+    }
+}
+if (tailscaleRefreshBtn) tailscaleRefreshBtn.addEventListener('click', refreshTailscaleStatus);
+async function toggleFunnel(enable) {
+    if (!tailscaleStatusEl) return;
+    tailscaleStatusEl.textContent = enable ? 'Enabling funnel…' : 'Disabling funnel…';
+    tailscaleStatusEl.className = 'setting-feedback';
+    try {
+        const r = await fetch(api('/api/tailscale/funnel'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enable })
+        });
+        const data = await r.json();
+        if (!r.ok || data.error) {
+            tailscaleStatusEl.className = 'setting-feedback error';
+            tailscaleStatusEl.textContent = data.error || `Failed (HTTP ${r.status})`;
+        } else {
+            tailscaleStatusEl.className = 'setting-feedback success';
+            tailscaleStatusEl.textContent = enable
+                ? (data.funnelUrl ? `Funnel up: ${data.funnelUrl}` : 'Funnel enabled.')
+                : 'Funnel disabled.';
+        }
+        refreshTailscaleStatus();
+    } catch (e) {
+        tailscaleStatusEl.className = 'setting-feedback error';
+        tailscaleStatusEl.textContent = 'Backend unreachable.';
+    }
+}
+if (tailscaleEnableBtn) tailscaleEnableBtn.addEventListener('click', () => toggleFunnel(true));
+if (tailscaleDisableBtn) tailscaleDisableBtn.addEventListener('click', () => toggleFunnel(false));
+// Initial probe (cheap GET; safe if backend isn't reachable)
+setTimeout(refreshTailscaleStatus, 1500);
+
+// ── Connected devices settings UI ───────────────────────
+const deviceNameInput = document.getElementById('deviceNameInput');
+const deviceNameSaveBtn = document.getElementById('deviceNameSaveBtn');
+if (deviceNameInput) deviceNameInput.value = localStorage.getItem('sentient_deviceName') || deviceDisplayName();
+if (deviceNameSaveBtn) {
+    deviceNameSaveBtn.addEventListener('click', () => {
+        const v = (deviceNameInput.value || '').trim();
+        if (v) localStorage.setItem('sentient_deviceName', v);
+        else localStorage.removeItem('sentient_deviceName');
+        // Re-register so other devices see the new name.
+        try { registerDevice(); } catch (e) {}
+    });
+}
+
 // Copy Google Buttons to Settings
 const setGoogleTasks = document.getElementById('settingsGoogleTasksBtn');
 const setGoogleCal = document.getElementById('settingsGoogleCalBtn');
@@ -2705,14 +3059,74 @@ async function refreshOpenClawStatus() {
         const r = await fetch(api('/api/openclaw/status'));
         if (!r.ok) { setOpenClawStatus('error', 'NOT INSTALLED'); return; }
         const data = await r.json();
-        if (data.gatewayUp) setOpenClawStatus('online', 'ONLINE');
-        else if (data.installed) setOpenClawStatus('offline', 'INSTALLED · OFFLINE');
-        else setOpenClawStatus('error', 'NOT INSTALLED');
+        // Update remote-toggle UI from server truth (so two tabs see the same state).
+        if (typeof openclawUseRemote !== 'undefined' && openclawUseRemote) {
+            openclawUseRemote.checked = !!data.useRemote;
+            if (data.remoteBaseUrl && openclawRemoteUrl && !openclawRemoteUrl.value) {
+                openclawRemoteUrl.value = data.remoteBaseUrl;
+            }
+            syncOpenClawRemoteUI();
+        }
+        if (data.gatewayUp) {
+            setOpenClawStatus('online', data.useRemote ? `ONLINE · REMOTE (${data.activeBaseUrl})` : 'ONLINE');
+        } else if (data.useRemote) {
+            setOpenClawStatus('error', `REMOTE UNREACHABLE (${data.activeBaseUrl || ''})`);
+        } else if (data.installed) {
+            setOpenClawStatus('offline', 'INSTALLED · OFFLINE');
+        } else {
+            setOpenClawStatus('error', 'NOT INSTALLED');
+        }
     } catch (e) {
         setOpenClawStatus('error', 'SERVER UNREACHABLE');
     }
 }
 if (openclawRefreshBtn) openclawRefreshBtn.addEventListener('click', refreshOpenClawStatus);
+
+// ── Remote-gateway toggle (local vs VPS/other-device OpenClaw) ──────────
+const openclawUseRemote = document.getElementById('openclawUseRemote');
+const openclawRemoteUrl = document.getElementById('openclawRemoteUrl');
+const openclawRemoteToken = document.getElementById('openclawRemoteToken');
+const openclawConnectionSaveBtn = document.getElementById('openclawConnectionSaveBtn');
+const openclawRemoteOnlyEls = document.querySelectorAll('.openclaw-remote-only');
+
+function syncOpenClawRemoteUI() {
+    if (!openclawUseRemote) return;
+    const on = openclawUseRemote.checked;
+    openclawRemoteOnlyEls.forEach(el => { el.style.display = on ? '' : 'none'; });
+}
+if (openclawUseRemote) openclawUseRemote.addEventListener('change', syncOpenClawRemoteUI);
+if (openclawConnectionSaveBtn) {
+    openclawConnectionSaveBtn.addEventListener('click', async () => {
+        const payload = {
+            useRemote: !!(openclawUseRemote && openclawUseRemote.checked),
+            remoteBaseUrl: (openclawRemoteUrl && openclawRemoteUrl.value || '').trim(),
+            remoteAuthToken: (openclawRemoteToken && openclawRemoteToken.value || '').trim(),
+        };
+        openclawSaveStatus.textContent = 'Saving connection…';
+        openclawSaveStatus.className = 'setting-feedback';
+        try {
+            const r = await fetch(api('/api/openclaw/connection'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            const data = await r.json();
+            if (!r.ok || data.error) {
+                openclawSaveStatus.className = 'setting-feedback error';
+                openclawSaveStatus.textContent = data.error || `Save failed (HTTP ${r.status})`;
+            } else {
+                openclawSaveStatus.className = 'setting-feedback success';
+                openclawSaveStatus.textContent = data.gatewayUp
+                    ? `Connected to ${data.activeBaseUrl}.`
+                    : `Saved. Gateway not reachable at ${data.activeBaseUrl}.`;
+                refreshOpenClawStatus();
+            }
+        } catch (e) {
+            openclawSaveStatus.className = 'setting-feedback error';
+            openclawSaveStatus.textContent = 'Backend unreachable.';
+        }
+    });
+}
 
 if (openclawSaveBtn) {
     openclawSaveBtn.addEventListener('click', async () => {

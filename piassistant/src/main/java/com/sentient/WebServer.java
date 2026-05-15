@@ -2,6 +2,7 @@ package com.sentient;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
+import com.sentient.service.AuthService;
 import com.sentient.service.AutomationService;
 import com.sentient.service.GoogleTasksService;
 import com.sentient.service.GoogleCalendarService;
@@ -10,6 +11,7 @@ import com.sentient.service.Listener;
 import com.sentient.service.OpenClawConfigManager;
 import com.sentient.service.OpenClawService;
 import com.sentient.service.SpotifyService;
+import com.sentient.service.TailscaleService;
 import com.sentient.service.TextToSpeech;
 import com.sentient.util.ProfileManager;
 import io.javalin.Javalin;
@@ -44,10 +46,14 @@ public class WebServer {
     private final AutomationService automation;
     private final GoogleTasksService googleTasks;
     private final GoogleCalendarService googleCalendar;
+    private final TailscaleService tailscale;
+    private final AuthService auth;
     private Listener listener;
 
     // Active WebSocket clients
     private final Set<WsContext> clients = ConcurrentHashMap.newKeySet();
+    /** Per-WS-session metadata: deviceName, capabilities, lastSeen. */
+    private final java.util.Map<String, JsonObject> deviceMeta = new ConcurrentHashMap<>();
     private String currentSessionId = "";
 
     // Response control — for stop/interrupt
@@ -64,12 +70,27 @@ public class WebServer {
         this.automation = new AutomationService();
         this.googleTasks = new GoogleTasksService();
         this.googleCalendar = new GoogleCalendarService();
+        this.tailscale = new TailscaleService();
+        this.auth = new AuthService();
 
         this.app = Javalin.create(config -> {
             config.staticFiles.add("/web", Location.CLASSPATH);
             config.http.defaultContentType = "application/json";
+            // Wire Gson as the JSON mapper so ctx.json(...) actually works.
+            // Without this, every ctx.json(<object>) call 500s on Javalin 6.
+            config.jsonMapper(new io.javalin.json.JsonMapper() {
+                @Override
+                public String toJsonString(Object obj, java.lang.reflect.Type type) {
+                    return gson.toJson(obj, type);
+                }
+                @Override
+                public <T> T fromJsonString(String json, java.lang.reflect.Type targetType) {
+                    return gson.fromJson(json, targetType);
+                }
+            });
         });
 
+        setupAuthGate();
         setupWebSocket();
         setupRestEndpoints();
         initListener();
@@ -98,17 +119,147 @@ public class WebServer {
         app.stop();
     }
 
+    // ── Auth gate (shared password) ─────────────────────
+
+    /**
+     * Routes that should always be reachable, even when auth is required.
+     * These are: the login screen + auth APIs, OAuth callback returns, and the
+     * static asset root (so we can deliver the login page itself).
+     */
+    private static final java.util.Set<String> AUTH_OPEN_PATHS = java.util.Set.of(
+            "/", "/login", "/login.html", "/favicon.ico",
+            "/api/auth/status", "/api/auth/login",
+            "/api/spotify/callback", "/api/tasks/google/callback");
+
+    private void setupAuthGate() {
+        // Auth endpoints always exist.
+        app.get("/api/auth/status", ctx -> {
+            JsonObject s = auth.statusJson();
+            // Tell the client whether THEIR token is still valid.
+            String tok = readToken(ctx);
+            s.addProperty("loggedIn", !auth.isAuthRequired() || auth.isValidToken(tok));
+            ctx.result(s.toString());
+            ctx.contentType("application/json");
+        });
+
+        app.post("/api/auth/login", ctx -> {
+            JsonObject body = ctx.body() == null || ctx.body().isBlank()
+                    ? new JsonObject() : gson.fromJson(ctx.body(), JsonObject.class);
+            String password = getStr(body, "password", "");
+            if (!auth.checkPassword(password)) {
+                ctx.status(401).result("{\"error\":\"Invalid password.\"}");
+                ctx.contentType("application/json");
+                return;
+            }
+            JsonObject out = new JsonObject();
+            out.addProperty("success", true);
+            // If no password is set, no token is needed; return a dummy so the client
+            // can still store a flag in localStorage.
+            out.addProperty("token", auth.isAuthRequired() ? auth.issueToken() : "OPEN");
+            ctx.result(out.toString());
+            ctx.contentType("application/json");
+        });
+
+        app.post("/api/auth/logout", ctx -> {
+            auth.revokeToken(readToken(ctx));
+            ctx.result("{\"success\":true}");
+            ctx.contentType("application/json");
+        });
+
+        app.post("/api/auth/password", ctx -> {
+            // Setting the first password is open (no prior token). Changing requires a valid token.
+            if (auth.isAuthRequired() && !auth.isValidToken(readToken(ctx))) {
+                ctx.status(401).result("{\"error\":\"Log in first.\"}");
+                return;
+            }
+            JsonObject body = ctx.body() == null || ctx.body().isBlank()
+                    ? new JsonObject() : gson.fromJson(ctx.body(), JsonObject.class);
+            String pw = getStr(body, "password", "");
+            auth.setPassword(pw);
+            JsonObject out = new JsonObject();
+            out.addProperty("success", true);
+            out.addProperty("required", auth.isAuthRequired());
+            ctx.result(out.toString());
+            ctx.contentType("application/json");
+        });
+
+        // Filter: every /api/* request goes through the gate.
+        app.before("/api/*", ctx -> {
+            if (!auth.isAuthRequired()) return;
+            String path = ctx.path();
+            if (AUTH_OPEN_PATHS.contains(path)) return;
+            String tok = readToken(ctx);
+            if (!auth.isValidToken(tok)) {
+                ctx.status(401).result("{\"error\":\"Authentication required.\"}");
+                ctx.contentType("application/json");
+                ctx.skipRemainingHandlers();
+            }
+        });
+
+        // Standalone login page (served regardless of static-file path).
+        app.get("/login", ctx -> {
+            ctx.contentType("text/html; charset=UTF-8");
+            ctx.result(LOGIN_PAGE_HTML);
+        });
+    }
+
+    private static String readToken(io.javalin.http.Context ctx) {
+        String t = ctx.header("X-Sentient-Token");
+        if (t == null || t.isEmpty()) t = ctx.queryParam("token");
+        return t == null ? "" : t;
+    }
+
+    // Inline login page — small, no framework, no external assets.
+    private static final String LOGIN_PAGE_HTML =
+            "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Sentient · Sign in</title>"
+            + "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+            + "<style>"
+            + "body{background:#0d0d0d;color:#e5e7eb;font-family:ui-monospace,Menlo,monospace;"
+            + "display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}"
+            + ".box{background:#1a1a1a;padding:32px;border:1px solid #27272a;border-radius:12px;width:340px}"
+            + "h1{margin:0 0 16px;font-size:18px;letter-spacing:1px;color:#a3e635}"
+            + "input{width:100%;box-sizing:border-box;padding:10px;background:#0d0d0d;color:#e5e7eb;"
+            + "border:1px solid #3f3f46;border-radius:6px;font:inherit;font-size:14px;margin-bottom:12px}"
+            + "button{width:100%;padding:10px;background:#a3e635;color:#0d0d0d;border:0;border-radius:6px;"
+            + "font:inherit;font-weight:600;cursor:pointer}"
+            + ".err{color:#f87171;margin-top:8px;min-height:1em;font-size:13px}"
+            + ".hint{color:#71717a;font-size:12px;margin-top:14px;line-height:1.5}"
+            + "</style></head><body><div class=\"box\">"
+            + "<h1>SENTIENT · SIGN IN</h1>"
+            + "<form id=\"f\"><input id=\"pw\" type=\"password\" placeholder=\"password\" autofocus>"
+            + "<button type=\"submit\">SIGN IN</button></form>"
+            + "<div class=\"err\" id=\"err\"></div>"
+            + "<div class=\"hint\">If you haven't set a password yet, leave the field empty and click "
+            + "Sign In. Then set one from Settings → Device Login.</div>"
+            + "<script>"
+            + "document.getElementById('f').addEventListener('submit',async e=>{e.preventDefault();"
+            + "const r=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},"
+            + "body:JSON.stringify({password:document.getElementById('pw').value})});"
+            + "if(!r.ok){document.getElementById('err').textContent='Incorrect password.';return;}"
+            + "const d=await r.json();localStorage.setItem('sentient_token',d.token);location.href='/';});"
+            + "</script></div></body></html>";
+
     // ── WebSocket ───────────────────────────────────────
 
     private void setupWebSocket() {
         app.ws("/ws", ws -> {
             ws.onConnect(ctx -> {
+                if (auth.isAuthRequired()) {
+                    String tok = ctx.queryParam("token");
+                    if (tok == null) tok = ctx.header("X-Sentient-Token");
+                    if (!auth.isValidToken(tok)) {
+                        System.out.println("[WS] Rejecting unauthenticated connect.");
+                        try { ctx.closeSession(); } catch (Exception ignored) {}
+                        return;
+                    }
+                }
                 clients.add(ctx);
                 System.out.println("[WS] Client connected: " + ctx.sessionId());
             });
 
             ws.onClose(ctx -> {
                 clients.remove(ctx);
+                deviceMeta.remove(ctx.sessionId());
                 System.out.println("[WS] Client disconnected: " + ctx.sessionId());
             });
 
@@ -157,11 +308,75 @@ public class WebServer {
                     case "ping":
                         // Keep-alive from web client handled silently
                         break;
+                    case "register_device": {
+                        // Browser announces this device's display name + capabilities.
+                        JsonObject meta = new JsonObject();
+                        meta.addProperty("sessionId", ctx.sessionId());
+                        meta.addProperty("name", msg.has("name") ? msg.get("name").getAsString() : "Device");
+                        meta.addProperty("platform", msg.has("platform") ? msg.get("platform").getAsString() : "");
+                        if (msg.has("capabilities")) meta.add("capabilities", msg.get("capabilities"));
+                        meta.addProperty("lastSeen", System.currentTimeMillis());
+                        deviceMeta.put(ctx.sessionId(), meta);
+                        // Broadcast device list update so every tab sees the new device
+                        broadcastDeviceList();
+                        break;
+                    }
+                    case "request_screen": {
+                        // Forward a screen-frame request to the target device by sessionId.
+                        String target = msg.has("targetSessionId") ? msg.get("targetSessionId").getAsString() : "";
+                        String reqId = msg.has("requestId") ? msg.get("requestId").getAsString() : "";
+                        JsonObject fwd = new JsonObject();
+                        fwd.addProperty("type", "capture_screen");
+                        fwd.addProperty("requestId", reqId);
+                        fwd.addProperty("requesterSessionId", ctx.sessionId());
+                        sendToSession(target, fwd);
+                        break;
+                    }
+                    case "screen_frame": {
+                        // Device replies with a captured frame — relay back to requester.
+                        String requester = msg.has("requesterSessionId")
+                                ? msg.get("requesterSessionId").getAsString() : "";
+                        sendToSession(requester, msg);
+                        break;
+                    }
+                    case "remote_action": {
+                        // Stub: relay a control request (typed text / URL open) to the target device.
+                        // Browsers can't inject OS keystrokes — this is for in-tab actions only
+                        // (e.g. "open a URL", "switch panel"). See DEVICE_CONTROL.md.
+                        String target = msg.has("targetSessionId") ? msg.get("targetSessionId").getAsString() : "";
+                        JsonObject fwd = new JsonObject();
+                        fwd.addProperty("type", "remote_action");
+                        if (msg.has("action")) fwd.add("action", msg.get("action"));
+                        if (msg.has("payload")) fwd.add("payload", msg.get("payload"));
+                        fwd.addProperty("requesterSessionId", ctx.sessionId());
+                        sendToSession(target, fwd);
+                        break;
+                    }
                     default:
                         System.out.println("[WS] Unknown message type: " + type);
                 }
             });
         });
+    }
+
+    private void sendToSession(String sessionId, JsonObject msg) {
+        if (sessionId == null || sessionId.isEmpty()) return;
+        String json = msg.toString();
+        for (WsContext c : clients) {
+            if (sessionId.equals(c.sessionId())) {
+                try { c.send(json); } catch (Exception ignored) {}
+                return;
+            }
+        }
+    }
+
+    private void broadcastDeviceList() {
+        JsonObject msg = new JsonObject();
+        msg.addProperty("type", "device_list");
+        com.google.gson.JsonArray arr = new com.google.gson.JsonArray();
+        for (JsonObject m : deviceMeta.values()) arr.add(m);
+        msg.add("devices", arr);
+        broadcast(msg);
     }
 
     // ── Chat Handler ────────────────────────────────────
@@ -690,7 +905,7 @@ public class WebServer {
             } else {
                 token.addProperty("token", "");
             }
-            ctx.json(token.toString());
+            ctx.json(token);
         });
 
         // User playlists
@@ -748,35 +963,35 @@ public class WebServer {
             String deviceId = body.has("device_id") ? body.get("device_id").getAsString() : null;
             JsonObject result = new JsonObject();
             result.addProperty("success", spotify.play(uri, deviceId));
-            ctx.json(result.toString());
+            ctx.json(result);
         });
 
         // Pause
         app.post("/api/spotify/pause", ctx -> {
             JsonObject result = new JsonObject();
             result.addProperty("success", spotify.pause());
-            ctx.json(result.toString());
+            ctx.json(result);
         });
 
         // Resume
         app.post("/api/spotify/resume", ctx -> {
             JsonObject result = new JsonObject();
             result.addProperty("success", spotify.resume());
-            ctx.json(result.toString());
+            ctx.json(result);
         });
 
         // Skip next
         app.post("/api/spotify/skip", ctx -> {
             JsonObject result = new JsonObject();
             result.addProperty("success", spotify.skipNext());
-            ctx.json(result.toString());
+            ctx.json(result);
         });
 
         // Previous
         app.post("/api/spotify/previous", ctx -> {
             JsonObject result = new JsonObject();
             result.addProperty("success", spotify.skipPrevious());
-            ctx.json(result.toString());
+            ctx.json(result);
         });
 
         // Playback state
@@ -817,7 +1032,7 @@ public class WebServer {
             String deviceId = body.has("device_id") ? body.get("device_id").getAsString() : "";
             JsonObject result = new JsonObject();
             result.addProperty("success", spotify.transferPlayback(deviceId));
-            ctx.json(result.toString());
+            ctx.json(result);
         });
 
         // Create playlist
@@ -856,7 +1071,7 @@ public class WebServer {
             }
             JsonObject result = new JsonObject();
             result.addProperty("success", spotify.addTracksToPlaylist(id, uris));
-            ctx.json(result.toString());
+            ctx.json(result);
         });
 
         // ── Automation Endpoints ──────────────────────────────
@@ -880,7 +1095,7 @@ public class WebServer {
             JsonObject result = new JsonObject();
             result.addProperty("success", true);
             result.addProperty("message", "Registered automation: " + name);
-            ctx.json(result.toString());
+            ctx.json(result);
         });
 
         // Trigger an automation by name
@@ -1104,13 +1319,34 @@ public class WebServer {
 
         // Status: is the binary installed, is the gateway reachable, where is the config?
         app.get("/api/openclaw/status", ctx -> {
-            JsonObject status = new JsonObject();
+            JsonObject status = openClaw.getConnectionStatus();
             status.addProperty("installed", openClawConfig.isInstalled());
             status.addProperty("gatewayUp", openClaw.isGatewayUp());
             status.addProperty("configPath", openClawConfig.configPath().toString());
             String bin = openClawConfig.findOpenClawBinary();
             if (bin != null) status.addProperty("binary", bin);
-            ctx.json(status.toString());
+            ctx.json(status);
+        });
+
+        // GET current remote-gateway configuration (token masked).
+        app.get("/api/openclaw/connection", ctx -> {
+            ctx.result(openClaw.getConnectionStatus().toString());
+            ctx.contentType("application/json");
+        });
+
+        // POST to update local vs remote mode + remote credentials.
+        app.post("/api/openclaw/connection", ctx -> {
+            JsonObject body = gson.fromJson(ctx.body(), JsonObject.class);
+            boolean useRemote = body.has("useRemote") && body.get("useRemote").getAsBoolean();
+            String remoteUrl = getStr(body, "remoteBaseUrl", "");
+            String remoteToken = getStr(body, "remoteAuthToken", "");
+            openClaw.setRemoteGateway(remoteUrl, remoteToken);
+            openClaw.setUseRemote(useRemote);
+            JsonObject result = openClaw.getConnectionStatus();
+            result.addProperty("success", true);
+            result.addProperty("gatewayUp", openClaw.isGatewayUp());
+            ctx.result(result.toString());
+            ctx.contentType("application/json");
         });
 
         // Read the current OpenClaw config (sanitized: API keys masked).
@@ -1215,6 +1451,30 @@ public class WebServer {
                 result.addProperty("reply", reply);
             }
             ctx.result(result.toString());
+            ctx.contentType("application/json");
+        });
+
+        // ── Devices (browser tabs / clients) ───────────────────
+        app.get("/api/devices", ctx -> {
+            com.google.gson.JsonArray arr = new com.google.gson.JsonArray();
+            for (JsonObject m : deviceMeta.values()) arr.add(m);
+            ctx.json(arr);
+        });
+
+        // ── Tailscale (Funnel) Endpoints ───────────────────────
+        app.get("/api/tailscale/status", ctx -> {
+            ctx.result(tailscale.status(PORT).toString());
+            ctx.contentType("application/json");
+        });
+
+        app.post("/api/tailscale/funnel", ctx -> {
+            JsonObject body = ctx.body() == null || ctx.body().isBlank()
+                    ? new JsonObject()
+                    : gson.fromJson(ctx.body(), JsonObject.class);
+            boolean enable = body.has("enable") && body.get("enable").getAsBoolean();
+            JsonObject result = enable ? tailscale.enableFunnel(PORT) : tailscale.disableFunnel();
+            int status = result.has("error") ? 500 : 200;
+            ctx.status(status).result(result.toString());
             ctx.contentType("application/json");
         });
 

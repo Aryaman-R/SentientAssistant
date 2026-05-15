@@ -32,56 +32,133 @@ public class OpenClawService {
     private static final int MAX_HISTORY_TURNS = 10;
     private static final int TIMEOUT_SECONDS = 60;
 
+    /** Persists the "remote vs local" toggle and credentials so it survives restarts. */
+    private static final java.nio.file.Path CONNECTION_FILE = java.nio.file.Paths.get(
+            System.getProperty("user.home"), ".sentient_openclaw_connection.json");
+
     private final HttpClient client;
     private final Gson gson = new Gson();
     private final List<JsonObject> conversationHistory = new ArrayList<>();
 
-    private volatile String baseUrl = DEFAULT_BASE_URL;
+    private volatile String localBaseUrl = DEFAULT_BASE_URL;
+    private volatile String remoteBaseUrl = "";
+    private volatile boolean useRemote = false;
+    private volatile String localAuthToken = "";
+    private volatile String remoteAuthToken = "";
+
     private volatile String defaultModel = DEFAULT_MODEL;
-    private volatile String authToken = ""; // empty = no Authorization header sent
 
     public OpenClawService() {
         this.client = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
                 .build();
+        loadConnectionFile();
+    }
+
+    /** Effective base URL given the current mode. */
+    private String activeBaseUrl() {
+        if (useRemote && remoteBaseUrl != null && !remoteBaseUrl.isBlank()) return remoteBaseUrl;
+        return localBaseUrl;
+    }
+
+    private String activeAuthToken() {
+        return useRemote ? remoteAuthToken : localAuthToken;
     }
 
     // ── Configuration mutators (called by WebServer when settings change) ──
 
+    /** Sets the LOCAL gateway URL (the one started by `openclaw gateway start` on this host). */
     public void setBaseUrl(String url) {
-        if (url != null && !url.isBlank()) this.baseUrl = url.replaceAll("/+$", "");
+        if (url != null && !url.isBlank()) this.localBaseUrl = url.replaceAll("/+$", "");
     }
 
     public void setDefaultModel(String model) {
         if (model != null && !model.isBlank()) this.defaultModel = model;
     }
 
+    /** Sets the LOCAL gateway auth token. */
     public void setAuthToken(String token) {
-        this.authToken = token == null ? "" : token.trim();
+        this.localAuthToken = token == null ? "" : token.trim();
     }
 
-    public String getBaseUrl() { return baseUrl; }
+    /** Toggle between local and remote gateways. */
+    public void setUseRemote(boolean useRemote) {
+        this.useRemote = useRemote;
+        persistConnectionFile();
+    }
+
+    /** Configure the remote gateway (VPS / other device). */
+    public void setRemoteGateway(String url, String token) {
+        this.remoteBaseUrl = url == null ? "" : url.trim().replaceAll("/+$", "");
+        this.remoteAuthToken = token == null ? "" : token.trim();
+        persistConnectionFile();
+    }
+
+    public String getBaseUrl() { return activeBaseUrl(); }
     public String getDefaultModel() { return defaultModel; }
+    public boolean isUsingRemote() { return useRemote; }
+    public String getLocalBaseUrl() { return localBaseUrl; }
+    public String getRemoteBaseUrl() { return remoteBaseUrl; }
 
     public void clearHistory() { conversationHistory.clear(); }
 
     // ── Health check ────────────────────────────────────
 
-    /** Quick check — does the gateway respond at all? */
+    /** Quick check — does the active gateway respond at all? */
     public boolean isGatewayUp() {
         try {
-            HttpRequest req = HttpRequest.newBuilder()
-                    .uri(URI.create(baseUrl + "/v1/models"))
-                    .timeout(Duration.ofSeconds(2))
-                    .GET()
-                    .build();
-            HttpResponse<Void> r = client.send(req, HttpResponse.BodyHandlers.discarding());
+            HttpRequest.Builder b = HttpRequest.newBuilder()
+                    .uri(URI.create(activeBaseUrl() + "/v1/models"))
+                    .timeout(Duration.ofSeconds(4))
+                    .GET();
+            String tok = activeAuthToken();
+            if (!tok.isEmpty()) b.header("Authorization", "Bearer " + tok);
+            HttpResponse<Void> r = client.send(b.build(), HttpResponse.BodyHandlers.discarding());
             int code = r.statusCode();
             // Any 2xx/4xx response from the right port = it's up. Only network errors mean down.
             return code < 500;
         } catch (Exception e) {
             return false;
         }
+    }
+
+    // ── Connection persistence (remote toggle survives restarts) ──
+
+    private void persistConnectionFile() {
+        try {
+            JsonObject o = new JsonObject();
+            o.addProperty("useRemote", useRemote);
+            o.addProperty("remoteBaseUrl", remoteBaseUrl);
+            o.addProperty("remoteAuthToken", remoteAuthToken);
+            java.nio.file.Files.writeString(CONNECTION_FILE, gson.toJson(o));
+        } catch (Exception e) {
+            System.err.println("[OpenClaw] Could not persist connection file: " + e.getMessage());
+        }
+    }
+
+    private void loadConnectionFile() {
+        try {
+            if (!java.nio.file.Files.exists(CONNECTION_FILE)) return;
+            String raw = java.nio.file.Files.readString(CONNECTION_FILE).trim();
+            if (raw.isEmpty()) return;
+            JsonObject o = com.google.gson.JsonParser.parseString(raw).getAsJsonObject();
+            if (o.has("useRemote")) useRemote = o.get("useRemote").getAsBoolean();
+            if (o.has("remoteBaseUrl")) remoteBaseUrl = o.get("remoteBaseUrl").getAsString();
+            if (o.has("remoteAuthToken")) remoteAuthToken = o.get("remoteAuthToken").getAsString();
+        } catch (Exception e) {
+            System.err.println("[OpenClaw] Could not load connection file: " + e.getMessage());
+        }
+    }
+
+    /** Snapshot of current connection state for the UI. */
+    public JsonObject getConnectionStatus() {
+        JsonObject o = new JsonObject();
+        o.addProperty("useRemote", useRemote);
+        o.addProperty("activeBaseUrl", activeBaseUrl());
+        o.addProperty("localBaseUrl", localBaseUrl);
+        o.addProperty("remoteBaseUrl", remoteBaseUrl);
+        o.addProperty("hasRemoteToken", !remoteAuthToken.isEmpty());
+        return o;
     }
 
     // ── Chat ─────────────────────────────────────────────
@@ -190,14 +267,16 @@ public class OpenClawService {
 
         payload.add("messages", messages);
 
+        String base = activeBaseUrl();
         HttpRequest.Builder rb = HttpRequest.newBuilder()
-                .uri(URI.create(baseUrl + "/v1/chat/completions"))
+                .uri(URI.create(base + "/v1/chat/completions"))
                 .header("Content-Type", "application/json")
                 .timeout(Duration.ofSeconds(TIMEOUT_SECONDS))
                 .POST(HttpRequest.BodyPublishers.ofString(gson.toJson(payload)));
 
-        if (!authToken.isEmpty()) {
-            rb.header("Authorization", "Bearer " + authToken);
+        String tok = activeAuthToken();
+        if (!tok.isEmpty()) {
+            rb.header("Authorization", "Bearer " + tok);
         }
 
         try {
@@ -218,8 +297,9 @@ public class OpenClawService {
             return json.getAsJsonArray("choices").get(0).getAsJsonObject()
                     .getAsJsonObject("message").get("content").getAsString();
         } catch (java.net.ConnectException ce) {
-            return "Error: OpenClaw gateway unreachable at " + baseUrl
-                    + ". Is it running? Try 'openclaw gateway start'.";
+            return "Error: OpenClaw gateway unreachable at " + base
+                    + (useRemote ? ". Is the remote host reachable and the gateway running?"
+                                 : ". Is it running? Try 'openclaw gateway start'.");
         } catch (Exception e) {
             System.err.println("[OpenClaw] Call failed: " + e.getMessage());
             return "Error: OpenClaw call failed (" + e.getClass().getSimpleName() + ").";

@@ -13,29 +13,13 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
-
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * Google Calendar API integration — syncs events with Google Calendar.
- *
- * <p>
- * Shares OAuth credentials and tokens with {@link GoogleTasksService}.
- * The OAuth scope in GoogleTasksService has been expanded to include Calendar
- * access,
- * so a single authentication flow grants both Tasks + Calendar permissions.
- *
- * <h2>Setup</h2>
- * <ol>
- * <li>Enable the <b>Google Calendar API</b> in your Google Cloud Console
- * (same project as Google Tasks).</li>
- * <li>Use the same {@code GOOGLE_CLIENT_ID} and {@code GOOGLE_CLIENT_SECRET}
- * in your {@code .env} file.</li>
- * <li>Re-authenticate at {@code http://localhost:7070/api/tasks/google/auth}
- * to grant the expanded scope.</li>
- * </ol>
+ * Google Calendar integration — rewritten to share token file with
+ * {@link GoogleTasksService} and to retry on 401 automatically.
  */
 public class GoogleCalendarService {
 
@@ -44,43 +28,26 @@ public class GoogleCalendarService {
     private static final String TOKEN_URL = "https://oauth2.googleapis.com/token";
     private static final String CALENDAR_API = "https://www.googleapis.com/calendar/v3";
 
-    // Share token file with GoogleTasksService
     private static final Path TOKEN_FILE = Paths.get(
             System.getProperty("user.home"), ".sentient_google_tasks_token");
 
-    private final HttpClient client;
+    private final HttpClient http = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(15))
+            .build();
+    private final Gson gson = new Gson();
 
-    private volatile String accessToken;
-    private volatile String refreshToken;
-    private volatile long tokenExpiresAt = 0;
+    private volatile String accessToken = "";
+    private volatile String refreshToken = "";
+    private volatile long tokenExpiresAt = 0L;
     private volatile boolean authenticated = false;
 
-    public GoogleCalendarService() {
-        this.client = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(15))
-                .build();
-        restoreSession();
-    }
+    public GoogleCalendarService() { restoreSession(); }
 
-    // ── Auth helpers ──────────────────────────────────────────────────────
+    public boolean isAuthenticated() { return authenticated && !CLIENT_ID.isBlank(); }
+    public boolean isConfigured() { return !CLIENT_ID.isBlank() && !CLIENT_SECRET.isBlank(); }
 
-    public boolean isAuthenticated() {
-        return authenticated && !CLIENT_ID.isBlank();
-    }
+    public void refreshFromDisk() { restoreSession(); }
 
-    public boolean isConfigured() {
-        return !CLIENT_ID.isBlank() && !CLIENT_SECRET.isBlank();
-    }
-
-    /** Re-read tokens from disk (e.g. after GoogleTasksService completes OAuth). */
-    public void refreshFromDisk() {
-        restoreSession();
-    }
-
-    /**
-     * Probe whether Calendar can actually reach Google. Triggers a refresh if needed.
-     * Returns {authenticated, working, statusCode, error?}.
-     */
     public JsonObject getAuthHealth() {
         JsonObject out = new JsonObject();
         out.addProperty("configured", isConfigured());
@@ -90,343 +57,171 @@ public class GoogleCalendarService {
             out.addProperty("error", "Not authenticated. Connect Google to sync Calendar.");
             return out;
         }
-        if (!ensureAuthenticated()) {
+        if (!ensureFreshToken()) {
             out.addProperty("authenticated", false);
             out.addProperty("working", false);
             out.addProperty("error", "Calendar token refresh failed. Please reconnect Google.");
             return out;
         }
-        try {
-            HttpResponse<String> resp = apiGet(CALENDAR_API + "/users/me/calendarList?maxResults=1");
-            out.addProperty("statusCode", resp.statusCode());
-            if (resp.statusCode() == 200) {
-                out.addProperty("authenticated", true);
-                out.addProperty("working", true);
-                return out;
-            }
-            out.addProperty("authenticated", false);
-            out.addProperty("working", false);
-            out.addProperty("error", "Google Calendar returned HTTP " + resp.statusCode() + ".");
-            if (resp.statusCode() == 401) authenticated = false;
-            return out;
-        } catch (Exception e) {
+        HttpResp r = apiSend("GET", CALENDAR_API + "/users/me/calendarList?maxResults=1", null);
+        out.addProperty("statusCode", r.status);
+        if (r.status == 200) {
             out.addProperty("authenticated", true);
-            out.addProperty("working", false);
-            out.addProperty("error", "Could not reach Google Calendar: " + e.getMessage());
+            out.addProperty("working", true);
             return out;
         }
+        out.addProperty("authenticated", false);
+        out.addProperty("working", false);
+        out.addProperty("error", "Google Calendar returned HTTP " + r.status + ".");
+        return out;
     }
 
-    private boolean ensureAuthenticated() {
-        if (!authenticated)
-            return false;
-        if (System.currentTimeMillis() < tokenExpiresAt - 60_000)
-            return true;
-        return refreshAccessToken();
-    }
-
-    private boolean refreshAccessToken() {
-        try {
-            String body = "refresh_token=" + encode(refreshToken)
-                    + "&client_id=" + encode(CLIENT_ID)
-                    + "&client_secret=" + encode(CLIENT_SECRET)
-                    + "&grant_type=refresh_token";
-
-            HttpResponse<String> response = client.send(
-                    HttpRequest.newBuilder()
-                            .uri(URI.create(TOKEN_URL))
-                            .header("Content-Type", "application/x-www-form-urlencoded")
-                            .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
-                            .build(),
-                    HttpResponse.BodyHandlers.ofString());
-
-            if (response.statusCode() == 200) {
-                JsonObject json = JsonParser.parseString(response.body()).getAsJsonObject();
-                accessToken = json.get("access_token").getAsString();
-                tokenExpiresAt = System.currentTimeMillis()
-                        + (json.has("expires_in") ? json.get("expires_in").getAsLong() * 1000 : 3600_000);
-                if (json.has("refresh_token")) {
-                    refreshToken = json.get("refresh_token").getAsString();
-                }
-                authenticated = true;
-                return true;
-            }
-            System.err.println("[GoogleCalendar] Token refresh failed: " + response.body());
-            authenticated = false;
-            return false;
-        } catch (Exception e) {
-            System.err.println("[GoogleCalendar] Token refresh error: " + e.getMessage());
-            authenticated = false;
-            return false;
-        }
-    }
-
-    private void restoreSession() {
-        if (CLIENT_ID.isBlank())
-            return;
-        try {
-            if (Files.exists(TOKEN_FILE)) {
-                String json = Files.readString(TOKEN_FILE).trim();
-                if (!json.isEmpty()) {
-                    JsonObject saved = JsonParser.parseString(json).getAsJsonObject();
-                    refreshToken = saved.has("refresh_token") ? saved.get("refresh_token").getAsString() : null;
-                    accessToken = saved.has("access_token") ? saved.get("access_token").getAsString() : null;
-                    tokenExpiresAt = saved.has("expires_at") ? saved.get("expires_at").getAsLong() : 0;
-                    authenticated = refreshToken != null && !refreshToken.isBlank();
-                    if (authenticated) {
-                        System.out.println("[GoogleCalendar] Session restored from shared token.");
-                    }
-                }
-            }
-        } catch (Exception e) {
-            System.err.println("[GoogleCalendar] Could not restore session: " + e.getMessage());
-        }
-    }
-
-    // ── Calendar API operations ───────────────────────────────────────────
-
-    /**
-     * List events from the user's primary calendar.
-     *
-     * @param days how many days into the future to fetch (default: 7)
-     * @return JSON with "events" array
-     */
     public CompletableFuture<JsonObject> listEvents(int days) {
         return CompletableFuture.supplyAsync(() -> {
-            JsonObject result = new JsonObject();
-            if (!ensureAuthenticated()) {
-                result.addProperty("error", "Google Calendar not authenticated. Please authenticate first.");
-                return result;
+            JsonObject out = new JsonObject();
+            if (!ensureFreshToken()) {
+                out.addProperty("error", "Google Calendar not authenticated.");
+                return out;
             }
-
             try {
                 String timeMin = ZonedDateTime.now().format(DateTimeFormatter.ISO_OFFSET_DATE_TIME);
-                String timeMax = ZonedDateTime.now().plusDays(days)
-                        .format(DateTimeFormatter.ISO_OFFSET_DATE_TIME);
-
+                String timeMax = ZonedDateTime.now().plusDays(days).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME);
                 String url = CALENDAR_API + "/calendars/primary/events"
-                        + "?timeMin=" + encode(timeMin)
-                        + "&timeMax=" + encode(timeMax)
-                        + "&singleEvents=true"
-                        + "&orderBy=startTime"
-                        + "&maxResults=50";
-
-                HttpResponse<String> resp = apiGet(url);
-                if (resp.statusCode() != 200) {
-                    result.addProperty("error", "Failed to fetch events: HTTP " + resp.statusCode());
-                    System.err.println("[GoogleCalendar] List events failed: " + resp.body());
-                    return result;
+                        + "?timeMin=" + enc(timeMin)
+                        + "&timeMax=" + enc(timeMax)
+                        + "&singleEvents=true&orderBy=startTime&maxResults=250";
+                HttpResp r = apiSend("GET", url, null);
+                if (r.status != 200) {
+                    out.addProperty("error", "Failed to fetch events: HTTP " + r.status);
+                    return out;
                 }
-
-                JsonObject body = JsonParser.parseString(resp.body()).getAsJsonObject();
+                JsonObject body = parseObj(r.body);
                 JsonArray items = body.has("items") ? body.getAsJsonArray("items") : new JsonArray();
-
-                // Simplify events for frontend
                 JsonArray events = new JsonArray();
-                for (JsonElement elem : items) {
-                    JsonObject event = elem.getAsJsonObject();
+                for (JsonElement el : items) {
+                    JsonObject e = el.getAsJsonObject();
                     JsonObject simple = new JsonObject();
-                    simple.addProperty("id", event.has("id") ? event.get("id").getAsString() : "");
-                    simple.addProperty("title",
-                            event.has("summary") ? event.get("summary").getAsString() : "(No title)");
-                    simple.addProperty("description",
-                            event.has("description") ? event.get("description").getAsString() : "");
-
-                    // Start time
-                    if (event.has("start")) {
-                        JsonObject start = event.getAsJsonObject("start");
-                        simple.addProperty("start",
-                                start.has("dateTime") ? start.get("dateTime").getAsString()
-                                        : start.has("date") ? start.get("date").getAsString() : "");
-                        simple.addProperty("allDay", !start.has("dateTime"));
+                    simple.addProperty("id", strOr(e, "id", ""));
+                    simple.addProperty("title", strOr(e, "summary", "(No title)"));
+                    simple.addProperty("description", strOr(e, "description", ""));
+                    if (e.has("start")) {
+                        JsonObject s = e.getAsJsonObject("start");
+                        simple.addProperty("start", strOr(s, "dateTime", strOr(s, "date", "")));
+                        simple.addProperty("allDay", !s.has("dateTime"));
                     }
-                    // End time
-                    if (event.has("end")) {
-                        JsonObject end = event.getAsJsonObject("end");
-                        simple.addProperty("end",
-                                end.has("dateTime") ? end.get("dateTime").getAsString()
-                                        : end.has("date") ? end.get("date").getAsString() : "");
+                    if (e.has("end")) {
+                        JsonObject end = e.getAsJsonObject("end");
+                        simple.addProperty("end", strOr(end, "dateTime", strOr(end, "date", "")));
                     }
-
                     events.add(simple);
                 }
-
-                result.add("events", events);
-                result.addProperty("count", events.size());
-                System.out.println("[GoogleCalendar] Fetched " + events.size() + " events.");
+                out.add("events", events);
+                out.addProperty("count", events.size());
             } catch (Exception e) {
-                result.addProperty("error", "Failed to list events: " + e.getMessage());
-                System.err.println("[GoogleCalendar] listEvents error: " + e.getMessage());
+                out.addProperty("error", "Failed to list events: " + e.getMessage());
             }
-            return result;
+            return out;
         });
     }
 
-    /**
-     * Create a new event on the user's primary calendar.
-     *
-     * @param title       event title
-     * @param description event description
-     * @param startTime   ISO 8601 datetime (e.g. 2026-03-25T10:00:00-07:00)
-     * @param endTime     ISO 8601 datetime
-     * @return JSON with created event info
-     */
-    public CompletableFuture<JsonObject> createEvent(String title, String description,
-            String startTime, String endTime) {
+    public CompletableFuture<JsonObject> createEvent(String title, String description, String startTime, String endTime) {
         return CompletableFuture.supplyAsync(() -> {
-            JsonObject result = new JsonObject();
-            if (!ensureAuthenticated()) {
-                result.addProperty("error", "Google Calendar not authenticated.");
-                return result;
+            JsonObject out = new JsonObject();
+            if (!ensureFreshToken()) {
+                out.addProperty("error", "Google Calendar not authenticated.");
+                return out;
             }
-
-            try {
-                JsonObject event = new JsonObject();
-                event.addProperty("summary", title);
-                if (description != null && !description.isEmpty()) {
-                    event.addProperty("description", description);
-                }
-
-                JsonObject start = new JsonObject();
-                JsonObject end = new JsonObject();
-
-                // Check if it's a date-only (all-day) or dateTime
-                if (startTime.length() <= 10) {
-                    start.addProperty("date", startTime);
-                    end.addProperty("date", endTime);
-                } else {
-                    start.addProperty("dateTime", startTime);
-                    start.addProperty("timeZone", ZonedDateTime.now().getZone().getId());
-                    end.addProperty("dateTime", endTime);
-                    end.addProperty("timeZone", ZonedDateTime.now().getZone().getId());
-                }
-
-                event.add("start", start);
-                event.add("end", end);
-
-                HttpResponse<String> resp = apiPost(
-                        CALENDAR_API + "/calendars/primary/events", event.toString());
-
-                if (resp.statusCode() == 200 || resp.statusCode() == 201) {
-                    JsonObject created = JsonParser.parseString(resp.body()).getAsJsonObject();
-                    result.addProperty("success", true);
-                    result.addProperty("id", created.get("id").getAsString());
-                    result.addProperty("message", "Event created: " + title);
-                    System.out.println("[GoogleCalendar] Created event: " + title);
-                } else {
-                    result.addProperty("error", "Failed to create event: HTTP " + resp.statusCode());
-                    System.err.println("[GoogleCalendar] Create event failed: " + resp.body());
-                }
-            } catch (Exception e) {
-                result.addProperty("error", "Failed to create event: " + e.getMessage());
+            JsonObject event = new JsonObject();
+            event.addProperty("summary", title);
+            if (description != null && !description.isEmpty()) event.addProperty("description", description);
+            JsonObject start = new JsonObject(), end = new JsonObject();
+            if (startTime != null && startTime.length() <= 10) {
+                start.addProperty("date", startTime);
+                end.addProperty("date", endTime);
+            } else {
+                start.addProperty("dateTime", startTime);
+                start.addProperty("timeZone", ZonedDateTime.now().getZone().getId());
+                end.addProperty("dateTime", endTime);
+                end.addProperty("timeZone", ZonedDateTime.now().getZone().getId());
             }
-            return result;
+            event.add("start", start);
+            event.add("end", end);
+
+            HttpResp r = apiSend("POST", CALENDAR_API + "/calendars/primary/events", event.toString());
+            if (r.status == 200 || r.status == 201) {
+                JsonObject created = parseObj(r.body);
+                out.addProperty("success", true);
+                out.addProperty("id", strOr(created, "id", ""));
+                out.addProperty("message", "Event created: " + title);
+            } else {
+                out.addProperty("error", "Failed to create event: HTTP " + r.status + " " + r.body);
+            }
+            return out;
         });
     }
 
-    /**
-     * Delete an event by ID.
-     */
     public CompletableFuture<JsonObject> deleteEvent(String eventId) {
         return CompletableFuture.supplyAsync(() -> {
-            JsonObject result = new JsonObject();
-            if (!ensureAuthenticated()) {
-                result.addProperty("error", "Google Calendar not authenticated.");
-                return result;
+            JsonObject out = new JsonObject();
+            if (!ensureFreshToken()) {
+                out.addProperty("error", "Google Calendar not authenticated.");
+                return out;
             }
-
-            try {
-                HttpResponse<String> resp = apiDelete(
-                        CALENDAR_API + "/calendars/primary/events/" + eventId);
-
-                if (resp.statusCode() == 204 || resp.statusCode() == 200) {
-                    result.addProperty("success", true);
-                    result.addProperty("message", "Event deleted.");
-                    System.out.println("[GoogleCalendar] Deleted event: " + eventId);
-                } else {
-                    result.addProperty("error", "Failed to delete event: HTTP " + resp.statusCode());
-                }
-            } catch (Exception e) {
-                result.addProperty("error", "Failed to delete event: " + e.getMessage());
+            HttpResp r = apiSend("DELETE", CALENDAR_API + "/calendars/primary/events/" + eventId, null);
+            if (r.status == 200 || r.status == 204) {
+                out.addProperty("success", true);
+                out.addProperty("message", "Event deleted.");
+            } else {
+                out.addProperty("error", "Failed to delete event: HTTP " + r.status);
             }
-            return result;
+            return out;
         });
     }
 
-    /**
-     * Update an existing event.
-     */
     public CompletableFuture<JsonObject> updateEvent(String eventId, String title,
-            String description, String startTime, String endTime) {
+                                                     String description, String startTime, String endTime) {
         return CompletableFuture.supplyAsync(() -> {
-            JsonObject result = new JsonObject();
-            if (!ensureAuthenticated()) {
-                result.addProperty("error", "Google Calendar not authenticated.");
-                return result;
+            JsonObject out = new JsonObject();
+            if (!ensureFreshToken()) {
+                out.addProperty("error", "Google Calendar not authenticated.");
+                return out;
             }
-
-            try {
-                JsonObject event = new JsonObject();
-                if (title != null && !title.isEmpty())
-                    event.addProperty("summary", title);
-                if (description != null)
-                    event.addProperty("description", description);
-
-                if (startTime != null && !startTime.isEmpty()) {
-                    JsonObject start = new JsonObject();
-                    if (startTime.length() <= 10) {
-                        start.addProperty("date", startTime);
-                    } else {
-                        start.addProperty("dateTime", startTime);
-                        start.addProperty("timeZone", ZonedDateTime.now().getZone().getId());
-                    }
-                    event.add("start", start);
-                }
-
-                if (endTime != null && !endTime.isEmpty()) {
-                    JsonObject end = new JsonObject();
-                    if (endTime.length() <= 10) {
-                        end.addProperty("date", endTime);
-                    } else {
-                        end.addProperty("dateTime", endTime);
-                        end.addProperty("timeZone", ZonedDateTime.now().getZone().getId());
-                    }
-                    event.add("end", end);
-                }
-
-                HttpResponse<String> resp = apiPatch(
-                        CALENDAR_API + "/calendars/primary/events/" + eventId, event.toString());
-
-                if (resp.statusCode() == 200) {
-                    result.addProperty("success", true);
-                    result.addProperty("message", "Event updated.");
-                    System.out.println("[GoogleCalendar] Updated event: " + eventId);
-                } else {
-                    result.addProperty("error", "Failed to update event: HTTP " + resp.statusCode());
-                }
-            } catch (Exception e) {
-                result.addProperty("error", "Failed to update event: " + e.getMessage());
+            JsonObject patch = new JsonObject();
+            if (title != null && !title.isEmpty()) patch.addProperty("summary", title);
+            if (description != null) patch.addProperty("description", description);
+            if (startTime != null && !startTime.isEmpty()) {
+                JsonObject s = new JsonObject();
+                if (startTime.length() <= 10) s.addProperty("date", startTime);
+                else { s.addProperty("dateTime", startTime); s.addProperty("timeZone", ZonedDateTime.now().getZone().getId()); }
+                patch.add("start", s);
             }
-            return result;
+            if (endTime != null && !endTime.isEmpty()) {
+                JsonObject e = new JsonObject();
+                if (endTime.length() <= 10) e.addProperty("date", endTime);
+                else { e.addProperty("dateTime", endTime); e.addProperty("timeZone", ZonedDateTime.now().getZone().getId()); }
+                patch.add("end", e);
+            }
+            HttpResp r = apiSend("PATCH", CALENDAR_API + "/calendars/primary/events/" + eventId, patch.toString());
+            if (r.status == 200) {
+                out.addProperty("success", true);
+                out.addProperty("message", "Event updated.");
+            } else {
+                out.addProperty("error", "Failed to update event: HTTP " + r.status);
+            }
+            return out;
         });
     }
 
-    /**
-     * Get a summary of upcoming events for AI context.
-     * Returns a human-readable string of events in the next N days.
-     */
+    /** Human-readable summary for AI context. */
     public String getEventsSummary(int days) {
         try {
             JsonObject result = listEvents(days).get();
-            if (result.has("error"))
-                return "Calendar not available.";
+            if (result.has("error")) return "Calendar not available.";
             JsonArray events = result.getAsJsonArray("events");
-            if (events.size() == 0)
-                return "No upcoming events in the next " + days + " days.";
-
+            if (events.size() == 0) return "No upcoming events in the next " + days + " days.";
             StringBuilder sb = new StringBuilder();
-            for (JsonElement elem : events) {
-                JsonObject e = elem.getAsJsonObject();
+            for (JsonElement el : events) {
+                JsonObject e = el.getAsJsonObject();
                 sb.append("- ").append(e.get("title").getAsString());
                 if (e.has("start") && !e.get("start").getAsString().isEmpty()) {
                     sb.append(" (").append(e.get("start").getAsString()).append(")");
@@ -439,51 +234,125 @@ public class GoogleCalendarService {
         }
     }
 
-    // ── HTTP helpers ──────────────────────────────────────────────────────
+    // ── Token plumbing ─────────────────────────────────────────────────────
 
-    private HttpResponse<String> apiGet(String url) throws Exception {
-        return client.send(
-                HttpRequest.newBuilder()
-                        .uri(URI.create(url))
-                        .header("Authorization", "Bearer " + accessToken)
-                        .GET()
-                        .build(),
-                HttpResponse.BodyHandlers.ofString());
+    private synchronized boolean ensureFreshToken() {
+        if (!authenticated || refreshToken.isBlank()) return false;
+        if (!accessToken.isBlank() && System.currentTimeMillis() < tokenExpiresAt - 60_000) return true;
+        return refreshAccessToken();
     }
 
-    private HttpResponse<String> apiPost(String url, String body) throws Exception {
-        return client.send(
-                HttpRequest.newBuilder()
-                        .uri(URI.create(url))
-                        .header("Authorization", "Bearer " + accessToken)
-                        .header("Content-Type", "application/json; charset=UTF-8")
-                        .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
-                        .build(),
-                HttpResponse.BodyHandlers.ofString());
+    private boolean refreshAccessToken() {
+        try {
+            String body = "refresh_token=" + enc(refreshToken)
+                    + "&client_id=" + enc(CLIENT_ID)
+                    + "&client_secret=" + enc(CLIENT_SECRET)
+                    + "&grant_type=refresh_token";
+            HttpResponse<String> resp = http.send(
+                    HttpRequest.newBuilder(URI.create(TOKEN_URL))
+                            .header("Content-Type", "application/x-www-form-urlencoded")
+                            .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+                            .build(),
+                    HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() == 200) {
+                JsonObject json = JsonParser.parseString(resp.body()).getAsJsonObject();
+                accessToken = json.get("access_token").getAsString();
+                long ttl = json.has("expires_in") ? json.get("expires_in").getAsLong() : 3600;
+                tokenExpiresAt = System.currentTimeMillis() + ttl * 1000L;
+                if (json.has("refresh_token")) refreshToken = json.get("refresh_token").getAsString();
+                saveTokenFile();
+                return true;
+            }
+            System.err.println("[GoogleCalendar] Refresh HTTP " + resp.statusCode() + ": " + resp.body());
+            if (resp.statusCode() == 400 || resp.statusCode() == 401) authenticated = false;
+            return false;
+        } catch (Exception e) {
+            System.err.println("[GoogleCalendar] Refresh error: " + e.getMessage());
+            return false;
+        }
     }
 
-    private HttpResponse<String> apiPatch(String url, String body) throws Exception {
-        return client.send(
-                HttpRequest.newBuilder()
-                        .uri(URI.create(url))
-                        .header("Authorization", "Bearer " + accessToken)
-                        .header("Content-Type", "application/json; charset=UTF-8")
-                        .method("PATCH", HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
-                        .build(),
-                HttpResponse.BodyHandlers.ofString());
+    private void restoreSession() {
+        if (CLIENT_ID.isBlank()) return;
+        try {
+            if (!Files.exists(TOKEN_FILE)) return;
+            String raw = Files.readString(TOKEN_FILE).trim();
+            if (raw.isEmpty()) return;
+            JsonObject saved = JsonParser.parseString(raw).getAsJsonObject();
+            refreshToken = strOr(saved, "refresh_token", "");
+            accessToken = strOr(saved, "access_token", "");
+            tokenExpiresAt = saved.has("expires_at") ? saved.get("expires_at").getAsLong() : 0L;
+            authenticated = !refreshToken.isBlank();
+            if (authenticated) System.out.println("[GoogleCalendar] Session restored from shared token.");
+        } catch (Exception e) {
+            System.err.println("[GoogleCalendar] Could not restore session: " + e.getMessage());
+        }
     }
 
-    private HttpResponse<String> apiDelete(String url) throws Exception {
-        return client.send(
-                HttpRequest.newBuilder()
-                        .uri(URI.create(url))
-                        .header("Authorization", "Bearer " + accessToken)
-                        .DELETE()
-                        .build(),
-                HttpResponse.BodyHandlers.ofString());
+    private void saveTokenFile() {
+        try {
+            JsonObject saved = new JsonObject();
+            saved.addProperty("access_token", accessToken);
+            saved.addProperty("refresh_token", refreshToken);
+            saved.addProperty("expires_at", tokenExpiresAt);
+            Files.writeString(TOKEN_FILE, gson.toJson(saved));
+        } catch (Exception e) {
+            System.err.println("[GoogleCalendar] Could not save token: " + e.getMessage());
+        }
     }
 
-    private static String encode(String value) {
-        return URLEncoder.encode(value, StandardCharsets.UTF_8);
+    private HttpResp apiSend(String method, String url, String body) {
+        if (!ensureFreshToken()) return new HttpResp(401, "{\"error\":\"no_token\"}");
+        HttpResp r = doRequest(method, url, body, accessToken);
+        if (r.status == 401 && refreshAccessToken()) {
+            r = doRequest(method, url, body, accessToken);
+        }
+        return r;
     }
+
+    private HttpResp doRequest(String method, String url, String body, String token) {
+        try {
+            HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(url))
+                    .header("Authorization", "Bearer " + token)
+                    .timeout(Duration.ofSeconds(15));
+            HttpRequest.BodyPublisher bp = body == null
+                    ? HttpRequest.BodyPublishers.noBody()
+                    : HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8);
+            if (body != null) b.header("Content-Type", "application/json; charset=UTF-8");
+            switch (method) {
+                case "GET":    b.GET(); break;
+                case "POST":   b.POST(bp); break;
+                case "PUT":    b.PUT(bp); break;
+                case "DELETE": b.DELETE(); break;
+                case "PATCH":  b.method("PATCH", bp); break;
+                default:       b.method(method, bp);
+            }
+            HttpResponse<String> resp = http.send(b.build(), HttpResponse.BodyHandlers.ofString());
+            return new HttpResp(resp.statusCode(), resp.body() == null ? "" : resp.body());
+        } catch (Exception e) {
+            System.err.println("[GoogleCalendar] " + method + " " + url + " failed: " + e.getMessage());
+            return new HttpResp(0, "{\"error\":\"" + e.getMessage() + "\"}");
+        }
+    }
+
+    private static class HttpResp {
+        final int status; final String body;
+        HttpResp(int s, String b) { status = s; body = b; }
+    }
+
+    private static JsonObject parseObj(String s) {
+        try {
+            JsonElement el = JsonParser.parseString(s);
+            return el.isJsonObject() ? el.getAsJsonObject() : new JsonObject();
+        } catch (Exception e) {
+            return new JsonObject();
+        }
+    }
+
+    private static String strOr(JsonObject o, String key, String def) {
+        if (o == null || !o.has(key) || o.get(key).isJsonNull()) return def;
+        try { return o.get(key).getAsString(); } catch (Exception e) { return def; }
+    }
+
+    private static String enc(String v) { return URLEncoder.encode(v, StandardCharsets.UTF_8); }
 }
